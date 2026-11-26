@@ -1,0 +1,10 @@
+{
+  "name": "Burn GPU puissance constante (Intel / AMD / NVIDIA)",
+  "description": "Chauffe en puissance maximale et stable (FP32 FMA pur vérifié sans concurrence mémoire) pendant 10 min, suivie d'un contrôle VRAM dédié de 5 min. Idéal pour stabiliser la puissance au TDP sur Intel Arc Pro (B70/B60…), AMD et NVIDIA.",
+  "cooldown_s": 30,
+  "steps": [
+    {"bench": "gpu_oclburn", "time_s": 600, "params": {"mode": "power"}},
+    {"pause": 30},
+    {"bench": "gpu_oclburn", "time_s": 300, "params": {"mode": "memory", "vram_pct": 90}}
+  ]
+}

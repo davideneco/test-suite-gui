@@ -1,0 +1,43 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging and build outputs
+build/
+dist/
+*.egg-info/
+*.bin
+*.build/
+*.dist/
+*.onefile-build/
+
+# Local runtime files
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# BenchSuite local/generated data
+BenchmarkResults/
+*.log
+
+# Editors and OS metadata
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Fichiers temporaires
+*.tmp
+
+# Fichiers locaux d'outils de version / compilation
+.last_version
+.venv_compile/

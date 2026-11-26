@@ -1,0 +1,8 @@
+{
+  "name": "Burn GPU vérifié (OpenCL, toutes marques)",
+  "description": "Burn à 100 % de tous les GPU OpenCL (Intel, AMD, NVIDIA) pendant 10 min : calcul entier / FP32 / FP16 et VRAM en continu, résultats vérifiés (erreurs de calcul et de mémoire), courbes de température / puissance et puissance atteinte en % de la limite de la carte. À lancer avec le refroidissement de production.",
+  "cooldown_s": 60,
+  "steps": [
+    {"bench": "gpu_oclburn", "time_s": 600, "params": {"vram_pct": 90, "mode": "all"}}
+  ]
+}

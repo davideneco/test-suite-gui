@@ -1,0 +1,13 @@
+{"name": "Recette SSD NVMe (performance, stabilité, chauffe)",
+ "description": "Performance (Peak, SNIA débit/latence), latence OCP, stabilité (liens PCIe, intégrité CRC, déluge d'E/S) et chauffe, en version courte (10–15 min par test). ÉCRIT sur le disque : renseigner --fio-path sur un disque de DONNÉES (jamais le disque système). Les profils complets (1 h, 4 h, 6 h) sont dans l'interface, onglets Stabilité / Chauffe / Endurance.",
+ "cooldown_s": 60,
+ "steps": [
+  {"fio": "peak_suite_all"},
+  {"fio": "snia_pts_throughput"},
+  {"fio": "snia_pts_latency"},
+  {"fio": "ocp_cto3_qd1", "time_s": 600},
+  {"fio": "stab_link_saturation_30m", "time_s": 600},
+  {"fio": "stab_small_io_flood_30m", "time_s": 600},
+  {"fio": "stab_verify_crc_30m", "time_s": 600},
+  {"fio": "heat_seq_write_30m", "time_s": 900}
+ ]}

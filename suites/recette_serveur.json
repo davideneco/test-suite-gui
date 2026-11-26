@@ -1,0 +1,35 @@
+{
+  "name": "Recette serveur complète",
+  "description": "CPU+RAM, bande passante mémoire (STREAM), GPU (stress, VRAM), puis stockage (fio) sur un disque de DONNÉES : renseigner --fio-path (jamais le disque système).",
+  "cooldown_s": 60,
+  "steps": [
+    {
+      "stress": "mix_30m",
+      "time_s": 600
+    },
+    {
+      "bench": "ram_stream"
+    },
+    {
+      "bench": "gpu_fryer",
+      "params": {
+        "time_s": 600
+      }
+    },
+    {
+      "bench": "gpu_vram_test",
+      "params": {
+        "time_s": 300
+      }
+    },
+    {
+      "bench": "gpu_vram_bw"
+    },
+    {
+      "bench": "gpu_nvbandwidth"
+    },
+    {
+      "fio": "peak_seq1m_q8t1_read"
+    }
+  ]
+}

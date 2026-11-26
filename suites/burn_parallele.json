@@ -1,0 +1,16 @@
+{
+  "name": "Burn complet en parallèle (CPU + GPU + SSD)",
+  "description": "Chauffe toute la machine d'un coup : burn CPU+RAM, gpu-fryer et profil SSD en même temps pendant 30 min, puis pause et contrôle GPU. Renseigner --fio-path (disque de DONNÉES).",
+  "cooldown_s": 60,
+  "steps": [
+    {
+      "parallel": [
+        {"stress": "mix_30m"},
+        {"bench": "gpu_fryer", "time_s": 1800},
+        {"fio": "stress_nvme_1h", "time_s": 1800}
+      ]
+    },
+    {"pause": 60},
+    {"bench": "gpu_vram_test", "params": {"time_s": 300}}
+  ]
+}

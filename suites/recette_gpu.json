@@ -1,0 +1,34 @@
+{
+  "name": "Recette GPU",
+  "description": "Stress GPU 10 min (gpu-fryer), intégrité VRAM (gpu-burn), bande passante VRAM et inter-GPU, puis diagnostic DCGM niveau 3 (~15 min, NVIDIA datacenter). Adapter les durées/outils.",
+  "cooldown_s": 60,
+  "steps": [
+    {
+      "bench": "gpu_fryer",
+      "params": {
+        "time_s": 600
+      }
+    },
+    {
+      "pause": 60
+    },
+    {
+      "bench": "gpu_vram_test",
+      "params": {
+        "time_s": 300
+      }
+    },
+    {
+      "bench": "gpu_vram_bw"
+    },
+    {
+      "bench": "gpu_nvbandwidth"
+    },
+    {
+      "bench": "gpu_dcgm",
+      "params": {
+        "level": 3
+      }
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "Contrôle rapide CPU + RAM",
+  "description": "Vérification express (~10 min) : charge CPU 5 min puis Burn RAM 5 min.",
+  "cooldown_s": 10,
+  "steps": [
+    {
+      "stress": "cpu_all_5m"
+    },
+    {
+      "stress": "ram_burn_5m"
+    }
+  ]
+}

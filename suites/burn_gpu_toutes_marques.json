@@ -1,0 +1,10 @@
+{
+  "name": "Burn GPU toutes marques (Vulkan + OpenCL)",
+  "description": "Chauffe prolongée d'un GPU Intel, AMD ou NVIDIA avec des outils libres : vkpeak (Vulkan) 10 min puis clpeak FP32 (OpenCL) 10 min, avec mesure de la chute de performance en charge soutenue et courbes de température. À lancer avec le refroidissement de production.",
+  "cooldown_s": 60,
+  "steps": [
+    {"bench": "gpu_vkpeak", "time_s": 600},
+    {"pause": 60},
+    {"bench": "gpu_clpeak", "time_s": 600, "params": {"test_mode": "compute-sp"}}
+  ]
+}
