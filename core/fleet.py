@@ -22,7 +22,9 @@ TEMP_TOL_C = 5.0        # un hotspot à plus de 5 °C au-dessus de la médiane d
 def _latest_reports(root: str) -> Dict[str, str]:
     """{clé machine: chemin du rapport JSON le plus récent}."""
     best: Dict[str, tuple] = {}
-    for path in glob.glob(os.path.join(root, "**", "benchsuite_report_*.json"), recursive=True):
+    paths = (glob.glob(os.path.join(root, "**", "benchsuite_report_*.json"), recursive=True)
+             + glob.glob(os.path.join(root, "**", "benchsuite_report.json"), recursive=True))
+    for path in set(paths):
         try:
             with open(path, encoding="utf-8") as f:
                 head = json.load(f)

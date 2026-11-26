@@ -453,11 +453,11 @@ class CampaignRunner:
 
     # ── télémétrie / point de contrôle ──────────────────────────────────────
     def _series_hook(self, point: dict) -> None:
-        self._points.append({k: v for k, v in point.items() if k != "_src"})
-        if len(self._points) > MAX_PARTIAL_POINTS:
-            del self._points[: len(self._points) - MAX_PARTIAL_POINTS]
         now = time.time()
         with self._cp_lock:             # les threads d'un groupe parallèle appellent ce hook en même temps
+            self._points.append({k: v for k, v in point.items() if k != "_src"})
+            if len(self._points) > MAX_PARTIAL_POINTS:
+                del self._points[: len(self._points) - MAX_PARTIAL_POINTS]
             if now - self._last_cp >= CHECKPOINT_EVERY_S:
                 self._last_cp = now
                 try:

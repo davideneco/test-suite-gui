@@ -4,7 +4,7 @@
 
 BenchSuite regroupe, dans une interface GTK4/Libadwaita et en ligne de commande, les meilleurs outils open source de test (stress-ng, fio, gpu-burn, gpu-fryer, nvbandwidth, DCGM, clpeak, vkpeak, STREAM, iperf3…). Il lance les tests, surveille capteurs et pannes matérielles pendant l'exécution, rend un **verdict automatique** et produit des rapports exploitables (HTML, PDF, JSON, CSV).
 
-Version actuelle : **1.0.19**
+Version actuelle : **1.0.20**
 
 ---
 

@@ -44,10 +44,13 @@ def latest_session(output_dir: str) -> Optional[str]:
     """Dossier de la session (démarrage courant de la machine) la plus récente sous `output_dir`, None sinon."""
     from core import cli_session as cs
     best, best_t = None, 0.0
-    for f in glob.glob(os.path.join(output_dir, "**", "session_*", cs.SESSION_FILE), recursive=True):
+    cands = (glob.glob(os.path.join(output_dir, "**", "*_session", cs.SESSION_FILE), recursive=True)
+             + glob.glob(os.path.join(output_dir, "**", "session_*", cs.SESSION_FILE), recursive=True))
+    for f in set(cands):
         try:
-            if os.path.getmtime(f) > best_t and cs.load(os.path.dirname(f)):
-                best, best_t = os.path.dirname(f), os.path.getmtime(f)
+            mt = os.path.getmtime(f)
+            if mt > best_t and cs.load(os.path.dirname(f)):
+                best, best_t = os.path.dirname(f), mt
         except Exception:
             continue
     return best

@@ -332,7 +332,7 @@ def _add_light_theme(template: str) -> str:
         if not m:
             return template
         light = theme.invert_css(m.group(2)) + theme.HTML_LIGHT_EXTRA
-        return template[:m.end(2) + len("</style>")] + '<style id="lightCss" media="not all">\n' + light + "</style>" + template[m.end(3):]
+        return template[:m.end(2) + len("</style>")] + '<style id="lightCss" media="not all">\n' + light + "</style></head>" + template[m.end(3):]
     except Exception:
         return template
 
@@ -491,8 +491,8 @@ def export_html(results: List[BenchmarkResult], out_dir: str, report_meta: dict 
             
             items_html += (
                 f'<div style="margin-top: 12px; margin-left: 12px;">'
-                f'<strong style="color: {lbl_color};">{prefix} {a["category"]}</strong> — <strong>{a["title"]}</strong>'
-                f'<p style="color: #cbd5e1; font-size: 13px; margin-top: 4px; line-height: 1.4;">{a["desc"]}</p>'
+                f'<strong style="color: {lbl_color};">{prefix} {_html.escape(str(a["category"]))}</strong> — <strong>{_html.escape(str(a["title"]))}</strong>'
+                f'<p style="color: #cbd5e1; font-size: 13px; margin-top: 4px; line-height: 1.4;">{_html.escape(str(a["desc"]))}</p>'
                 + (f'<p style="color: #94a3b8; font-size: 12px; margin-top: 2px;">Concernés : {_html.escape(" ; ".join(a["devices"]))}</p>' if a.get("devices") else "")
                 + f'</div>'
             )

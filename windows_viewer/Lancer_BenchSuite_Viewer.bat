@@ -19,7 +19,7 @@ if exist "%SCRIPT_DIR%python\python.exe" (
     if defined PY_CMD goto :run_viewer
 )
 
-for %%D in ("%LOCALAPPDATA%\Programs\Python\Python3*" "C:\Program Files\Python3*" "C:\Python3*") do (
+for /D %%D in ("%LOCALAPPDATA%\Programs\Python\Python3*" "C:\Program Files\Python3*" "C:\Python3*") do (
     if exist "%%~D\python.exe" (
         call :try_py "%%~D\python.exe"
         if defined PY_CMD goto :run_viewer

@@ -10,6 +10,7 @@ interface web locale sur 127.0.0.1 pour consulter, filtrer, comparer et ouvrir t
 """
 
 import argparse
+import contextlib
 import csv
 import datetime as _dt
 import hashlib
@@ -30,7 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-VIEWER_VERSION = "1.0.19"
+VIEWER_VERSION = "1.0.20"
 DB_SCHEMA_VERSION = 1
 IGNORED_FILES = {"benchsuite.db", "benchsuite.db-wal", "benchsuite.db-shm", "benchsuite.db-journal"}
 IGNORED_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules"}
@@ -342,11 +343,16 @@ class BenchSuiteDB:
         self._lock = threading.Lock()
         self._init_schema()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _connect(self):
         conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_schema(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1151,7 +1157,10 @@ let SEARCH_TIMER = null;
 const VERDICT_RANK = {{ NON_CONFORME: 4, A_VERIFIER: 3, CONFORME: 2, NON_EVALUE: 1, INFO_SEULE: 0 }};
 
 function esc(s) {{
-  return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}}
+function escJs(s) {{
+  return esc(JSON.stringify(String(s ?? "")));
 }}
 function fmtSize(n) {{
   if (n < 1024) return n + " o";
@@ -1474,10 +1483,10 @@ function renderActiveReportView(slotIdx) {{
       ? ` <span class="pill p-err">${{f.dmesg_error_count}} erreur(s)</span>` : "";
     const actions = [];
     if (isHtml || isPdf) {{
-      actions.push(`<button class="btn-accent" onclick="previewInReport(${{slotIdx}}, '${{esc(f.rel_path)}}', '${{isHtml ? "embed_html" : "embed_pdf"}}')">👁️ Voir ici</button>`);
+      actions.push(`<button class="btn-accent" onclick="previewInReport(${{slotIdx}}, ${{escJs(f.rel_path)}}, '${{isHtml ? "embed_html" : "embed_pdf"}}')">👁️ Voir ici</button>`);
       actions.push(`<a class="btn" target="_blank" href="/api/file?path=${{encodeURIComponent(f.rel_path)}}">↗ Nouvel onglet</a>`);
     }} else {{
-      actions.push(`<button class="btn-accent" onclick="previewInReport(${{slotIdx}}, '${{esc(f.rel_path)}}', 'api')">👁️ Aperçu ici</button>`);
+      actions.push(`<button class="btn-accent" onclick="previewInReport(${{slotIdx}}, ${{escJs(f.rel_path)}}, 'api')">👁️ Aperçu ici</button>`);
     }}
     actions.push(`<a class="btn" download href="/api/file?path=${{encodeURIComponent(f.rel_path)}}">⬇ Télécharger</a>`);
     return `<tr>
@@ -1655,7 +1664,7 @@ function renderFiles() {{
     if (directOpen) {{
       actions.push(`<a class="btn btn-accent" target="_blank" href="/api/file?path=${{encodeURIComponent(f.rel_path)}}">Ouvrir dans le navigateur</a>`);
     }} else {{
-      actions.push(`<button onclick="previewFile('${{esc(f.rel_path)}}')">Aperçu</button>`);
+      actions.push(`<button onclick="previewFile(${{escJs(f.rel_path)}})">Aperçu</button>`);
     }}
     actions.push(`<a class="btn" download href="/api/file?path=${{encodeURIComponent(f.rel_path)}}">Télécharger</a>`);
     return `<tr>
@@ -1705,11 +1714,14 @@ function drawDetailChart() {{
 
   if (item.seq) {{
     const chs = item.seq.channels || [];
-    const maxLen = Math.max(...chs.map(c => (c.values || []).length), 0);
-    labels = Array.from({{ length: maxLen }}, (_, i) => i + " s");
+    const tArr = Array.isArray(item.seq.t) ? item.seq.t : [];
+    const maxLen = Math.max(tArr.length, ...chs.map(c => (c.v || c.values || []).length), 0);
+    labels = tArr.length === maxLen
+      ? tArr.map(v => Number(v).toFixed(0) + " s")
+      : Array.from({{ length: maxLen }}, (_, i) => i + " s");
     datasets = chs.slice(0, 12).map((c, i) => ({{
       label: `${{c.label}} (${{c.unit || ""}})`,
-      data: c.values || [],
+      data: c.v || c.values || [],
       borderColor: palette[i % palette.length],
       borderWidth: 1.8, pointRadius: 0, tension: 0.15,
     }}));

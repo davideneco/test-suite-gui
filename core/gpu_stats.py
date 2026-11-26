@@ -82,18 +82,18 @@ def gpu_load_metrics(series: dict, gpu_index: int) -> dict:
     def peak(arr):
         return [x for x in (_num(v) for v in arr) if x is not None]
 
-    if temps:
-        out[pfx + "temp_max_c"] = max(peak(temps))
-        st = pick(temps)
-        if st: out[pfx + "temp_moy_c"] = _stats(st)["moy"]
-    if hs:
-        out[pfx + "temp_hotspot_max_c"] = max(peak(hs))
-        st = pick(hs)
-        if st: out[pfx + "temp_hotspot_moy_c"] = _stats(st)["moy"]
-    if vr:
-        out[pfx + "temp_vram_max_c"] = max(peak(vr))
-        st = pick(vr)
-        if st: out[pfx + "temp_vram_moy_c"] = _stats(st)["moy"]
+    for arr, k_max, k_moy in (
+        (temps, "temp_max_c", "temp_moy_c"),
+        (hs, "temp_hotspot_max_c", "temp_hotspot_moy_c"),
+        (vr, "temp_vram_max_c", "temp_vram_moy_c"),
+    ):
+        if arr:
+            pk = peak(arr)
+            if pk:
+                out[pfx + k_max] = max(pk)
+            st = pick(arr)
+            if st:
+                out[pfx + k_moy] = _stats(st)["moy"]
 
     # ΔT Hotspot ↔ Cœur : uniquement en charge stabilisée
     if temps and hs:

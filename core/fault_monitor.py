@@ -64,28 +64,47 @@ def classify_line(line: str) -> Optional[Dict]:
 
 
 def _terminate_proc(proc: subprocess.Popen) -> None:
-    """Termine proprement un sous-processus (et son groupe si session isolée), puis tue si nécessaire."""
+    """Termine proprement un sous-processus (et son groupe si session isolée), y compris s'il tourne via `sudo -n`."""
+    def _send(sig_name: str) -> None:
+        sig = getattr(signal, "SIG" + sig_name)
+        pgid = None
+        try:
+            pgid = os.getpgid(proc.pid)
+        except Exception:
+            pass
+        try:
+            if pgid == proc.pid:
+                os.killpg(pgid, sig)
+            else:
+                os.kill(proc.pid, sig)
+            return
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass
+        except Exception:
+            try:
+                proc.terminate() if sig_name == "TERM" else proc.kill()
+                return
+            except PermissionError:
+                pass
+            except Exception:
+                return
+        if shutil.which("sudo"):
+            target = [f"-{pgid}"] if pgid == proc.pid else [str(proc.pid)]
+            try:
+                subprocess.run(["sudo", "-n", "kill", f"-{sig_name}", "--"] + target,
+                               capture_output=True, timeout=3)
+            except Exception:
+                pass
+
     try:
         if proc.poll() is None:
-            try:
-                pgid = os.getpgid(proc.pid)
-                if pgid == proc.pid:
-                    os.killpg(pgid, signal.SIGTERM)
-                else:
-                    proc.terminate()
-            except Exception:
-                proc.terminate()
+            _send("TERM")
             try:
                 proc.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
-                try:
-                    pgid = os.getpgid(proc.pid)
-                    if pgid == proc.pid:
-                        os.killpg(pgid, signal.SIGKILL)
-                    else:
-                        proc.kill()
-                except Exception:
-                    proc.kill()
+                _send("KILL")
                 try:
                     proc.wait(timeout=1.0)
                 except Exception:

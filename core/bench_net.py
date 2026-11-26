@@ -88,32 +88,64 @@ def _iperf3_loopback(host: str, parsed: dict) -> str:
 
 
 def _iperf3_run(cmd: list, time_s: int, kill_event=None) -> tuple:
-    """Lance un client iperf3 (JSON) ; arrêt propre sur `kill_event`. Retourne (rc, stdout, stderr, arrêté_par_l_utilisateur)."""
+    """Lance un client iperf3 (JSON) sans blocage sur tampon pipe (>64 Ko) ; arrêt propre sur `kill_event`.
+    Retourne (rc, stdout, stderr, arrêté_par_l_utilisateur)."""
+    import tempfile
+    f_out = f_err = None
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        f_out = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+        f_err = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+        proc = subprocess.Popen(cmd, stdout=f_out, stderr=f_err, text=True, start_new_session=True)
     except Exception as e:
+        for fh in (f_out, f_err):
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
         return -1, "", str(e), False
-    t0, killed = time.time(), False
-    while proc.poll() is None:
-        if kill_event is not None and kill_event.is_set():
-            killed = True
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except Exception:
-                proc.kill()
-            break
-        if time.time() - t0 > time_s + 40:               # garde-fou : serveur muet / réseau coupé
+
+    t0, killed, timed_out = time.time(), False, False
+    try:
+        while proc.poll() is None:
+            if kill_event is not None and kill_event.is_set():
+                killed = True
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except Exception:
+                    proc.kill()
+                break
+            if time.time() - t0 > time_s + 40:               # garde-fou : serveur muet / réseau coupé
+                timed_out = True
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    proc.kill()
+                break
+            time.sleep(0.3)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except Exception:
                 proc.kill()
-            return -2, "", f"délai dépassé ({time_s + 40} s) : pas de réponse du serveur iperf3", False
-        time.sleep(0.3)
-    try:
-        out, err = proc.communicate(timeout=5)
-    except Exception:
-        out, err = "", ""
-    return proc.returncode, out, err, killed
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                pass
+        f_out.seek(0); out = f_out.read()
+        f_err.seek(0); err = f_err.read()
+    finally:
+        for fh in (f_out, f_err):
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+    if timed_out:
+        return -2, out, f"délai dépassé ({time_s + 40} s) : pas de réponse du serveur iperf3", False
+    return (proc.returncode if proc.returncode is not None else -1), out, err, killed
 
 
 def _iperf3_error_text(out: str, err: str) -> str:

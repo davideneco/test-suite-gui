@@ -98,7 +98,7 @@ def print_banner():
  |  _ \\ / _ \\ '_ \\ / __| '_ \\ \\___ \\| | | | | __/ _ \\
  | |_) |  __/ | | | (__| | | | ___) | |_| | | ||  __/
  |____/ \\___|_| |_|\\___|_| |_||____/ \\__,_|_|\\__\\___|{TermColor.RESET}
-                                {TermColor.BOLD}{TermColor.rgb(34, 211, 238)}Version CLI (Headless) 1.0.19{TermColor.RESET}
+                                {TermColor.BOLD}{TermColor.rgb(34, 211, 238)}Version CLI (Headless) 1.0.20{TermColor.RESET}
 """
     print(banner)
 
@@ -957,7 +957,8 @@ def main(argv=None):
         from core import inventory as inv_mod
         if args.inventory_diff:
             try:
-                a, b = (json.load(open(x, encoding="utf-8")) for x in args.inventory_diff)
+                with open(args.inventory_diff[0], encoding="utf-8") as fa, open(args.inventory_diff[1], encoding="utf-8") as fb:
+                    a, b = json.load(fa), json.load(fb)
             except (OSError, ValueError) as exc:
                 print(f"{TermColor.RED}Erreur : {exc}{TermColor.RESET}"); return EXIT_USAGE
             d = inv_mod.diff_inventory(a, b)

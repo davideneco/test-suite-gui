@@ -394,6 +394,7 @@ def bench_gpu_burn(
                            system_info=get_system_info(), notes=notes)
 
 
+@with_fault_watch
 def bench_gpu_fryer(
     time_s: int = 30,
     dtype: str = "float32",
@@ -439,6 +440,7 @@ def bench_gpu_fryer(
         
     lines = []
     timed_out = False
+    stopped_by_user = False
     stderr_out = ""
     proc = None
     q = queue.Queue()
@@ -490,6 +492,7 @@ def bench_gpu_fryer(
                     proc.kill()
                 break
             if kill_event and kill_event.is_set():
+                stopped_by_user = True
                 if cb:
                     cb(95, "Arrêt gpu-fryer…")
                 try:
@@ -537,11 +540,18 @@ def bench_gpu_fryer(
         lines = [str(e)]
     finally:
         _log_window_wait(stop_event, LOG_POST_SECONDS)
-        if proc and proc.poll() is None:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except Exception:
-                proc.kill()
+        if proc:
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    proc.kill()
+            for fh in (proc.stdout, proc.stderr):
+                if fh is not None:
+                    try:
+                        fh.close()
+                    except Exception:
+                        pass
         stop_event.set()
         poll_thread.join(timeout=3)
 
@@ -607,11 +617,18 @@ def bench_gpu_fryer(
                      "(lien cassé ?) et `nvidia-smi`. Si elle est absente : Ubuntu "
                      "`sudo apt install libnvidia-compute-<version>-server nvidia-utils-<version>-server`, "
                      "puis `sudo ldconfig`. Un gpu-fryer resté lancé continue de charger le GPU : `pkill -9 gpu-fryer`.")
+    elif stopped_by_user:
+        status = "stopped"
+        notes = f"gpu-fryer interrompu après {int(ran)} s."
     elif timed_out:
         status = "error" if score is None else "ok"
         notes = (f"gpu-fryer n'a pas rendu la main après {int(time_s * 1.5) + 180} s pour une durée demandée de {time_s} s : arrêt forcé. "
                  "Voir la sortie brute (dernière ligne affichée par gpu-fryer) ; `gpu-fryer --help` donne les options de la version installée.")
         metrics["arret_force"] = True
+    elif rc not in (0, None):
+        status = "error"
+        metrics["erreur"] = f"gpu-fryer a échoué (code retour {rc})"
+        notes = f"gpu-fryer s'est terminé avec le code retour {rc} — voir la sortie brute."
     elif ran > time_s * 1.15 + 30:
         notes = (f"gpu-fryer a tourné {int(ran)} s pour {time_s} s demandées : il ajoute son initialisation et son analyse finale "
                  "à la durée du burn.")
@@ -773,37 +790,61 @@ def bench_gpu_nvbandwidth(
     poll_thread.start()
     _log_window_wait(stop_event, LOG_PRE_SECONDS)
 
-    lines = []
     stopped_by_user = False
+    timed_out = False
     proc = None
+    stdout, stderr = "", ""
+    import tempfile
+    f_out = f_err = None
     try:
+        f_out = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+        f_err = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1, env=env, start_new_session=True,
+            cmd, stdout=f_out, stderr=f_err,
+            text=True, env=env, start_new_session=True,
         )
-        
+
         estimated_duration = max(5, iterations * 4)
+        hard_limit = max(300, int(iterations) * 120)
+        t_run = time.time()
         while proc.poll() is None:
             if kill_event and kill_event.is_set():
                 stopped_by_user = True
                 if cb: cb(95, "Arret nvbandwidth…")
                 _terminate_process_tree(proc, grace=0.8)
                 break
-            
+            if time.time() - t_run > hard_limit:
+                timed_out = True
+                if cb: cb(95, f"nvbandwidth ne répond plus ({hard_limit} s) : arrêt forcé…")
+                _terminate_process_tree(proc, grace=0.8)
+                break
+
             elapsed = time.time() - t0
             pct = min(90, int(10 + 80 * elapsed / estimated_duration))
-            
+
             temp_str  = f"{series.get('gpu0_temp', ['—'])[-1]:.0f}°C" if series.get("gpu0_temp") else "—"
             power_str = f"{series.get('gpu0_power', ['—'])[-1]:.0f}W" if series.get("gpu0_power") else "—"
             if cb:
                 cb(pct, f"Bande passante GPU… | {temp_str} | {power_str}")
             time.sleep(0.2)
-            
-        stdout, stderr = proc.communicate()
-        rc = proc.returncode
+
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _terminate_process_tree(proc, grace=0.5)
+        f_out.seek(0); stdout = f_out.read()
+        f_err.seek(0); stderr = f_err.read()
+        rc = -2 if timed_out else (proc.returncode if proc.returncode is not None else -3)
     except Exception as e:
         rc = -3
         stdout, stderr = "", str(e)
+    finally:
+        for fh in (f_out, f_err):
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
 
     _log_window_wait(stop_event, LOG_POST_SECONDS)
     stop_event.set()
@@ -815,6 +856,7 @@ def bench_gpu_nvbandwidth(
         combined += "\n--- stderr ---\n" + stderr
 
     metrics: dict = {
+        "command": cmd_str,
         "buffer_size_mb": buffer_size_mb,
         "iterations": iterations,
         "duration_s": round(dur, 1)
@@ -1021,6 +1063,9 @@ def bench_gpu_nvbandwidth(
     status = "ok"
     if stopped_by_user:
         status = "stopped"
+    elif timed_out:
+        status = "error"
+        metrics["erreur"] = "nvbandwidth a dépassé le délai maximal (arrêt forcé)"
     elif rc != 0 and score is None:
         status = "error"
         metrics["erreur"] = f"Code retour {rc}"
@@ -1031,7 +1076,7 @@ def bench_gpu_nvbandwidth(
 
     return BenchmarkResult(
         "GPU nvbandwidth", "GPU", score, "GB/s", dur, combined,
-        status=status, metrics=metrics, system_info=get_system_info()
+        status=status, metrics=metrics, system_info=get_system_info(), command=cmd_str
     )
 
 

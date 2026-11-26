@@ -579,27 +579,64 @@ _POWERSTAT_LAST = None
 _POWERSTAT_LOCK = threading.Lock()
 
 
+def _terminate_proc_maybe_sudo(proc) -> None:
+    """Arrête proprement un sous-processus et son groupe, y compris s'il a été lancé via `sudo -n` (root)."""
+    if proc is None:
+        return
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:
+        return
+
+    def _send_sig(sig_name: str) -> None:
+        sig = getattr(signal, "SIG" + sig_name)
+        pgid = None
+        try:
+            pgid = os.getpgid(proc.pid)
+        except Exception:
+            pass
+        try:
+            if pgid == proc.pid:
+                os.killpg(pgid, sig)
+            else:
+                os.kill(proc.pid, sig)
+            return
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass
+        except Exception:
+            pass
+        # Repli non-interactif si le processus tourne en root via `sudo -n`
+        if shutil.which("sudo"):
+            target = [f"-{pgid}"] if pgid == proc.pid else [str(proc.pid)]
+            try:
+                subprocess.run(["sudo", "-n", "kill", f"-{sig_name}", "--"] + target,
+                               capture_output=True, timeout=3)
+            except Exception:
+                pass
+
+    _send_sig("TERM")
+    try:
+        proc.wait(timeout=1.5)
+        return
+    except Exception:
+        pass
+    _send_sig("KILL")
+    try:
+        proc.wait(timeout=1.5)
+    except Exception:
+        pass
+
+
 def _stop_powerstat_proc() -> None:
     """Arrête proprement powerstat et ses descendants à la fermeture."""
     global _POWERSTAT_PROC
     proc = _POWERSTAT_PROC
     if proc is None:
         return
-    try:
-        if proc.poll() is None:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except Exception:
-                proc.terminate()
-            try:
-                proc.wait(timeout=2)
-            except Exception:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except Exception:
-                    proc.kill()
-    except Exception:
-        pass
+    _terminate_proc_maybe_sudo(proc)
     _POWERSTAT_PROC = None
 
 
@@ -695,6 +732,7 @@ def _detect_power_source() -> tuple:
     _tstat_env = os.environ.copy()
     _tstat_env["LC_ALL"] = "C"
     def _turbostat_has_sample(cmd: list) -> bool:
+        import select as _select
         proc = None
         try:
             proc = subprocess.Popen(
@@ -703,12 +741,19 @@ def _detect_power_source() -> tuple:
                 stderr=subprocess.DEVNULL,
                 text=True,
                 env=_tstat_env,
+                start_new_session=True,
             )
             end = time.time() + 2.5
             while time.time() < end:
                 if proc.poll() is not None:
                     return False
-                line = proc.stdout.readline() if proc.stdout is not None else ""
+                if proc.stdout is None:
+                    return False
+                rem = max(0.05, end - time.time())
+                ready, _, _ = _select.select([proc.stdout], [], [], min(0.25, rem))
+                if not ready:
+                    continue
+                line = proc.stdout.readline()
                 if not line:
                     continue
                 parts = line.strip().split()
@@ -724,12 +769,12 @@ def _detect_power_source() -> tuple:
             return False
         finally:
             if proc is not None:
-                try:
-                    if proc.poll() is None:
-                        proc.kill()
-                    proc.wait(timeout=1)
-                except Exception:
-                    pass
+                _terminate_proc_maybe_sudo(proc)
+                if proc.stdout is not None:
+                    try:
+                        proc.stdout.close()
+                    except Exception:
+                        pass
     if tool_exists("turbostat"):
         for prefix in ([], ["sudo", "-n"]):
             if _turbostat_has_sample(prefix + _TSTAT_CMD):
@@ -1171,7 +1216,9 @@ def _read_cpu_freqs_per_socket(base: str = None) -> "list[float]":
                     sc_all.append(sc)
                 if cpu in hw:
                     hw_all.append(hw[cpu])
-                socket_freqs.setdefault(pkg, []).append(hw[cpu] if cpu in hw else sc)
+                val_khz = hw[cpu] if cpu in hw else sc
+                if val_khz is not None:
+                    socket_freqs.setdefault(pkg, []).append(val_khz)
             except Exception:
                 pass
     except Exception:
@@ -1188,7 +1235,8 @@ def _read_cpu_freqs_per_socket(base: str = None) -> "list[float]":
     result = []
     for pkg_id in sorted(socket_freqs):
         freqs = socket_freqs[pkg_id]
-        result.append(round(sum(freqs) / len(freqs) / 1000))   # kHz → MHz
+        if freqs:
+            result.append(round(sum(freqs) / len(freqs) / 1000))   # kHz → MHz
     return result
 
 
@@ -1219,7 +1267,7 @@ def _read_cpu_freq_mhz() -> float:
     if per_socket:
         return round(sum(per_socket) / len(per_socket))
     # Fallback psutil
-    fi = psutil.cpu_freq()
+    fi = psutil.cpu_freq() if psutil else None
     if fi:
         v = fi.current
         return round(v * 1000 if v < 100 else v)
@@ -1285,19 +1333,23 @@ def _read_cpu_pcts_per_socket() -> "list[float]":
             res.append(round(sum(vals) / len(vals), 1))
         return res if res else [round(sum(per_cpu_pcts) / len(per_cpu_pcts), 1)]
     except Exception:
-        return [psutil.cpu_percent(interval=None)]
+        return [psutil.cpu_percent(interval=None)] if psutil else [0.0]
 
 
 def _poll_cpu_sensors(series: dict, stop: threading.Event, t0: float,
                       series_cb=None) -> None:
+    """Background thread: temp CPU, fréquence, charge, puissance par socket et capteurs VRM/Carte Mère."""
     try:
         from core.telemetry_aggregator import start_background_telemetry
         start_background_telemetry(series, stop.is_set)
-    except:
+    except Exception:
         pass
-    """Background thread: temp CPU, fréquence, charge, puissance par socket et capteurs VRM/Carte Mère."""
     import queue as _queue
-    psutil.cpu_percent(interval=None)
+    if psutil:
+        try:
+            psutil.cpu_percent(interval=None)
+        except Exception:
+            pass
     _freq_state_reset()
     src = _detect_power_source()
     _pwr_state: dict = {}
@@ -1314,7 +1366,7 @@ def _poll_cpu_sensors(series: dict, stop: threading.Event, t0: float,
             _tstat_proc = subprocess.Popen(
                 tstat_cmd,
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                env=tstat_env,
+                env=tstat_env, start_new_session=True,
             )
             def _tstat_reader():
                 socket_watts: dict = {}
@@ -1346,7 +1398,7 @@ def _poll_cpu_sensors(series: dict, stop: threading.Event, t0: float,
 
             # Charges par socket
             pcts = _read_cpu_pcts_per_socket()
-            pct  = pcts[0] if pcts else psutil.cpu_percent(interval=None)
+            pct  = pcts[0] if pcts else (psutil.cpu_percent(interval=None) if psutil else 0.0)
 
             # Capteurs de la carte (BMC, hwmon…) : UNE collecte par tour, partagée par la température, la puissance et les capteurs VRM / DIMM
             try:
@@ -1368,10 +1420,12 @@ def _poll_cpu_sensors(series: dict, stop: threading.Event, t0: float,
             if bmc_powers and sum(bmc_powers) > 0:
                 powers = bmc_powers
             elif _tstat_proc is not None:
-                try:
-                    last_powers = _tstat_q.get_nowait()
-                except _queue.Empty:
-                    pass
+                # Drainer jusqu'au dernier échantillon frais (évite la dérive en retard si IPMI/Redfish ralentit la boucle)
+                while True:
+                    try:
+                        last_powers = _tstat_q.get_nowait()
+                    except _queue.Empty:
+                        break
                 powers = last_powers
             else:
                 powers = _read_cpu_powers_per_socket(_pwr_state, tel_items)
@@ -1422,8 +1476,11 @@ def _poll_cpu_sensors(series: dict, stop: threading.Event, t0: float,
 
             if "ram_used_gb" in series:
                 try:
-                    vm = psutil.virtual_memory()
-                    series["ram_used_gb"].append(round((vm.total - vm.available) / 1073741824, 2))
+                    if psutil:
+                        vm = psutil.virtual_memory()
+                        series["ram_used_gb"].append(round((vm.total - vm.available) / 1073741824, 2))
+                    else:
+                        series["ram_used_gb"].append(0.0)
                 except Exception:
                     series["ram_used_gb"].append(0.0)
             if "ram_temp" in series:
@@ -1442,5 +1499,10 @@ def _poll_cpu_sensors(series: dict, stop: threading.Event, t0: float,
                 series_cb(pt)
             stop.wait(1.0)
     finally:
-        if _tstat_proc and _tstat_proc.poll() is None:
-            _tstat_proc.terminate()
+        if _tstat_proc is not None:
+            _terminate_proc_maybe_sudo(_tstat_proc)
+            if _tstat_proc.stdout is not None:
+                try:
+                    _tstat_proc.stdout.close()
+                except Exception:
+                    pass

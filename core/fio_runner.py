@@ -139,6 +139,7 @@ def _spawn_fio_process(cmd: list, needs_root: bool):
             except Exception as e:
                 return None, None, None, (-3, "", str(e))
 
+    f_out = f_err = None
     try:
         f_out = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
         f_err = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
@@ -150,8 +151,10 @@ def _spawn_fio_process(cmd: list, needs_root: bool):
         )
         return proc, f_out, f_err, None
     except FileNotFoundError:
+        _close_temp_files(f_out, f_err)
         return None, None, None, (-1, "", f"Introuvable : {cmd[0]}")
     except Exception as e:
+        _close_temp_files(f_out, f_err)
         return None, None, None, (-3, "", str(e))
 
 
@@ -476,13 +479,21 @@ def _side_label(name: str, side: str) -> str:
 
 
 _FIO_VALUE_OPTS = {"filename", "rw", "readwrite", "verify", "directory", "output-format", "output"}
+_FIO_EXTRA_VALUE_OPTS = {
+    "name", "bs", "blocksize", "bssplit", "blockalign", "size", "filesize", "offset",
+    "runtime", "ramp_time", "numjobs", "iodepth", "ioengine", "direct", "buffered",
+    "rwmixread", "rwmixwrite", "loops", "invalidate", "randrepeat", "random_distribution",
+    "cpus_allowed_policy", "cpus_allowed", "fdatasync", "fsync", "percentage_random",
+    "rate", "rate_iops", "nrfiles", "openfiles", "thinktime", "verify_fatal", "do_verify",
+    "eta", "eta-newline", "status-interval", "io_size", "percentile_list",
+}
 
 
 def _parse_fio_cli(raw_cmd: str) -> dict:
     """Analyse une commande fio libre pour le contrôle de sécurité, sans shell.
 
     Reconnaît `--opt=val` ET `--opt val` (fio accepte les deux), et lit les fichiers de job passés en argument
-    (`filename=`, `rw=` / `readwrite=`, `verify` / `trim`). Retourne {argv, targets, writes, error}.
+    (`filename=`, `directory=`, `rw=` / `readwrite=`, `verify` / `trim`). Retourne {argv, targets, writes, error}.
     En cas de doute (fichier de job illisible, commande qui n'est pas fio), `error` est rempli : la commande est refusée."""
     import shlex
     try:
@@ -500,10 +511,10 @@ def _parse_fio_cli(raw_cmd: str) -> dict:
         tok = argv[i]
         if tok.startswith("--"):
             key, eq, val = tok[2:].partition("=")
-            if not eq and key in _FIO_VALUE_OPTS and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+            if not eq and key in (_FIO_VALUE_OPTS | _FIO_EXTRA_VALUE_OPTS) and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
                 val = argv[i + 1]
                 i += 1
-            if key == "filename":
+            if key in ("filename", "directory"):
                 targets += [t for t in val.split(":") if t]
             elif key in ("rw", "readwrite"):
                 rw_vals.append(val)
@@ -518,7 +529,7 @@ def _parse_fio_cli(raw_cmd: str) -> dict:
                 for line in fh:
                     k, eq, v = line.strip().partition("=")
                     k, v = k.strip().lower(), v.strip()
-                    if k == "filename" and eq:
+                    if k in ("filename", "directory") and eq:
                         targets += [t for t in v.split(":") if t]
                     elif k in ("rw", "readwrite") and eq:
                         rw_vals.append(v)
@@ -554,7 +565,7 @@ def run_fio_from_cmd(raw_cmd: str, cb: ProgressCb = None,
     _stop = stop_flag_fn or (lambda: False)
     from core.ssd_diagnostics import read_ssd_sensors
     series = {"t": [], "disk_temp": [], "disk_power": []}
-    # Protection du disque système : toutes les formes de --filename / --rw / --readwrite, fichiers de job compris
+    # Protection du disque système : toutes les formes de --filename / --directory / --rw / --readwrite, fichiers de job compris
     parsed = _parse_fio_cli(raw_cmd)
     if parsed["error"]:
         return {"error": parsed["error"], "status": "error", "raw": parsed["error"]}
@@ -579,6 +590,16 @@ def run_fio_from_cmd(raw_cmd: str, cb: ProgressCb = None,
     preexisting = {t for t in targets if not t.startswith("/dev/") and os.path.exists(t)}
     argv = list(parsed["argv"])
 
+    def _cleanup_created_files():
+        for fp in targets:
+            if fp.startswith("/dev/") or fp in preexisting:
+                continue
+            try:
+                if os.path.isfile(fp):
+                    os.remove(fp)
+            except OSError:
+                pass
+
     proc, f_out, f_err, immediate_err = _spawn_fio_process(argv, needs_root=is_raw_cmd)
     if immediate_err is not None:
         _, _, err_msg = immediate_err
@@ -587,48 +608,42 @@ def run_fio_from_cmd(raw_cmd: str, cb: ProgressCb = None,
     t0 = time.time()
     deadline = t0 + timeout
     last_sensor = 0.0
-    while proc.poll() is None:
-        now = time.time()
-        if _stop():
-            _stop_fio(proc)
-            _close_temp_files(f_out, f_err)
-            return {"error": "Arrete", "status": "stopped", "raw": ""}
-        if now > deadline:
-            _stop_fio(proc)
-            _close_temp_files(f_out, f_err)
-            return {"error": "Timeout", "status": "error", "raw": ""}
-        if now - last_sensor >= 1.0:
-            last_sensor = now
-            t_el = round(now - t0, 1)
-            try:
-                temp_c, pwr_w, _ = read_ssd_sensors(target_p)
-                series["t"].append(t_el)
-                series["disk_temp"].append(temp_c)
-                series["disk_power"].append(pwr_w)
-                if on_series:
-                    on_series({"t": t_el, "temp": temp_c, "power": pwr_w})
-            except Exception:
-                pass
-        time.sleep(0.2)
+    try:
+        while proc.poll() is None:
+            now = time.time()
+            if _stop():
+                _stop_fio(proc)
+                _close_temp_files(f_out, f_err)
+                return {"error": "Arrete", "status": "stopped", "raw": ""}
+            if now > deadline:
+                _stop_fio(proc)
+                _close_temp_files(f_out, f_err)
+                return {"error": "Timeout", "status": "error", "raw": ""}
+            if now - last_sensor >= 1.0:
+                last_sensor = now
+                t_el = round(now - t0, 1)
+                try:
+                    temp_c, pwr_w, _ = read_ssd_sensors(target_p)
+                    series["t"].append(t_el)
+                    series["disk_temp"].append(temp_c)
+                    series["disk_power"].append(pwr_w)
+                    if on_series:
+                        on_series({"t": t_el, "temp": temp_c, "power": pwr_w})
+                except Exception:
+                    pass
+            time.sleep(0.2)
 
-    proc.wait()
-    if hasattr(proc, "get_output"):
-        out, err = proc.get_output()
-    else:
-        f_out.seek(0); out = f_out.read()
-        f_err.seek(0); err = f_err.read()
-        _close_temp_files(f_out, f_err)
-    rc = proc.returncode
-
-    # Nettoyage : uniquement les fichiers de test créés par ce fio (jamais un fichier de l'utilisateur déjà présent)
-    for fp in targets:
-        if fp.startswith("/dev/") or fp in preexisting:
-            continue
-        try:
-            if os.path.isfile(fp):
-                os.remove(fp)
-        except OSError:
-            pass
+        proc.wait()
+        if hasattr(proc, "get_output"):
+            out, err = proc.get_output()
+        else:
+            f_out.seek(0); out = f_out.read()
+            f_err.seek(0); err = f_err.read()
+            _close_temp_files(f_out, f_err)
+        rc = proc.returncode
+    finally:
+        # Nettoyage garanti (y compris après arrêt volontaire ou timeout)
+        _cleanup_created_files()
 
     if rc != 0:
         err_msg = err or out or "fio a echoue"

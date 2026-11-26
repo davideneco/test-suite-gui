@@ -658,7 +658,7 @@ def export_html_standalone(results: List[BenchmarkResult], outdir: str, meta: di
 
     payload = {
         "results": [r.to_dict() if hasattr(r, "to_dict") else r.__dict__ for r in results],
-        "meta": {"system_name": sys_name, "exported_at": ts_now, "version": "1.0.19", "source": "csv2html"},
+        "meta": {"system_name": sys_name, "exported_at": ts_now, "version": "1.0.20", "source": "csv2html"},
     }
     payload_json = json.dumps(payload, ensure_ascii=False)
 
@@ -908,7 +908,7 @@ pre {{
   <div class="topbar">
     <div>
       <h1>BenchSuite — Rapport d'importation CSV</h1>
-      <p class="subtitle">Système testé : <b>{_html_escape(sys_name)}</b> · Source : <b>csv2html (mode autonome)</b> · Export : {ts_now} · Version : v1.0.19{opt_badge}</p>
+      <p class="subtitle">Système testé : <b>{_html_escape(sys_name)}</b> · Source : <b>csv2html (mode autonome)</b> · Export : {ts_now} · Version : v1.0.20{opt_badge}</p>
     </div>
     <div class="top-actions">
       <button class="note-btn" id="themeBtn" type="button" onclick="cycleTheme()">🌙 Sombre</button>
@@ -1081,7 +1081,7 @@ function getSeriesUnit(key, label) {{
   const g = getMetricGroup(key);
   if (g === "power") return "W";
   if (g === "temp") return "°C";
-  const m = String(label || "").match(/\(([^)]+)\)\s*$/);
+  const m = String(label || "").match(/\\(([^)]+)\\)\\s*$/);
   return m ? m[1] : "";
 }}
 
@@ -1569,7 +1569,7 @@ function copyChartImage(btn) {{
 function downloadChartPNG(btn) {{
   const c2 = renderChartToCanvas();
   if (!c2) return;
-  const title = ((document.getElementById("chartTitle") || {{}}).textContent || "graphique_benchsuite").replace(/[^\w\-]+/g, "_").slice(0, 60);
+  const title = ((document.getElementById("chartTitle") || {{}}).textContent || "graphique_benchsuite").replace(/[^\\w\\-]+/g, "_").slice(0, 60);
   const a = document.createElement("a");
   a.href = c2.toDataURL("image/png");
   a.download = (title || "graphique_benchsuite") + ".png";
@@ -1629,7 +1629,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Gestion des jokers (*.csv) sous Windows cmd.exe et détection automatique si aucun argument fourni
     raw_files = args.csv_files
     if not raw_files:
-        found = sorted(glob.glob("*.csv") + glob.glob("*.CSV"))
+        # Déduplication insensible à la casse (Windows NTFS retourne les mêmes fichiers pour *.csv et *.CSV)
+        seen_norm = {}
+        for p in sorted(glob.glob("*.csv") + glob.glob("*.CSV")):
+            k = os.path.normcase(os.path.abspath(p))
+            seen_norm.setdefault(k, p)
+        found = sorted(seen_norm.values())
         if not found:
             print("✗ Aucun fichier CSV spécifié et aucun fichier *.csv trouvé dans le dossier courant.")
             print("\nUsage : python csv2html.py [fichier.csv ...] [-s 'Nom de la machine']")

@@ -142,9 +142,11 @@ def _thermal_line_chart(metrics: dict, series_keys: list,
 
     for panel_i, (vals, lbl, hex_col) in enumerate(zip(all_series, series_labels, series_colors)):
         if not vals: continue
+        num_vals = [float(v) for v in vals if isinstance(v, (int, float)) and math.isfinite(float(v))]
+        if not num_vals: continue
         col   = colors.HexColor(hex_col)
         py    = margin + (n_panels - 1 - panel_i) * (panel_h + margin)
-        vmin_data, vmax_data = min(vals), max(vals)
+        vmin_data, vmax_data = min(num_vals), max(num_vals)
         vmin, vmax, v_step = _nice_bounds(vmin_data, vmax_data, ticks=4)
 
         d.add(Rect(margin, py, width_pts - 2*margin, panel_h,
@@ -229,7 +231,9 @@ def _pdf_multi_gpu_charts(result: BenchmarkResult, width_pts: float, height_pts:
             continue
         n = len(t)
         step = max(1, n // 300)
-        allv = [x for v in lines.values() for x in v if x is not None]
+        allv = [x for v in lines.values() for x in v if x is not None and math.isfinite(x)]
+        if not allv:
+            continue
         lo, hi = min(allv), max(allv)
         raw_step = max((hi - lo) / 4.0, 1.0)
         mag = 10 ** int(math.floor(math.log10(raw_step)))
@@ -477,7 +481,7 @@ def export_pdf(results: List[BenchmarkResult], out_dir: str,
     story.append(Paragraph("Informations système au départ", h2))
     snap = payload["system"]["snapshot_at_start"]
     for sec_title, headers, sec_rows in _system_sections(snap, _gpu_list_from(system_info_data, payload)):
-        story.append(Paragraph(sec_title, styles["Heading4"]))
+        story.append(Paragraph(_html.escape(str(sec_title)), styles["Heading4"]))
         if headers:
             n = len(headers)
             widths = [182 * mm / n] * n
@@ -533,7 +537,8 @@ def export_pdf(results: List[BenchmarkResult], out_dir: str,
     camp = payload.get("inventory_campaign")
     if isinstance(camp, dict):
         story.append(Paragraph("Inventaire matériel — départ / fin de campagne", h2))
-        story.append(Paragraph(_pdf_safe(f"Départ : {camp.get('before', '')}<br/>Fin : {camp.get('after', '')}"), normal))
+        story.append(Paragraph(f"Départ : {_html.escape(_pdf_safe(str(camp.get('before', ''))))}<br/>"
+                               f"Fin : {_html.escape(_pdf_safe(str(camp.get('after', ''))))}", normal))
         rows_c = [[{"fail": "Anomalie", "warn": "À vérifier"}.get(f["level"], f["level"]), _pdf_safe(f["label"]),
                    _pdf_safe(f.get("detail", ""))] for f in camp.get("findings", [])]
         story.append(table([["Niveau", "Constat", "Détail"]] + rows_c, [22*mm, 80*mm, 80*mm]) if rows_c else
@@ -559,7 +564,7 @@ def export_pdf(results: List[BenchmarkResult], out_dir: str,
     for i, r in enumerate(results, 1):
         if i > 1 or (isinstance(seq, dict) and seq.get("channels")):
             story.append(PageBreak())
-        story.append(Paragraph(f"{i}. {r.name}", h2))
+        story.append(Paragraph(f"{i}. {_html.escape(str(r.name))}", h2))
         info_rows = [["Champ", "Valeur"], ["Catégorie", r.category], ["Statut", r.status],
                      ["Score", f"{r.score if r.score is not None else ''} {r.unit}"], ["Durée", f"{r.duration_s:.1f} s"],
                      ["Horodatage", r.timestamp[:19].replace("T", " ")]]
@@ -591,8 +596,8 @@ def export_pdf(results: List[BenchmarkResult], out_dir: str,
         el = r.metrics.get("electrical") if (_seq_elec_enabled() and isinstance(r.metrics.get("electrical"), dict)) else {}
         if el.get("sensors"):
             story.append(Paragraph("Électronique — relevé pendant le test", styles["Heading3"]))
-            story.append(Paragraph(_pdf_safe(f"{el.get('sensor_count', 0)} capteur(s), sources : {', '.join(el.get('sources', []))}. "
-                                             "Relevé passif ; tolérance ATX ±5 % vérifiée seulement pour les mesures du BMC."), normal))
+            story.append(Paragraph(_html.escape(_pdf_safe(f"{el.get('sensor_count', 0)} capteur(s), sources : {', '.join(el.get('sources', []))}. "
+                                                          "Relevé passif ; tolérance ATX ±5 % vérifiée seulement pour les mesures du BMC.")), normal))
             rows_e = [[_pdf_safe(str(c)) for c in row] for row in _electrical_rows(el)[:60]]
             story.append(table([["Capteur", "Source", "Type", "Min", "Moy.", "Max", "Unité", "Remarque"]] + rows_e,
                                [46*mm, 16*mm, 22*mm, 15*mm, 15*mm, 15*mm, 11*mm, 42*mm]))
@@ -600,7 +605,8 @@ def export_pdf(results: List[BenchmarkResult], out_dir: str,
         inv = r.metrics.get("inventory_diff") if isinstance(r.metrics.get("inventory_diff"), dict) else {}
         if inv:
             story.append(Paragraph("Inventaire matériel avant / après", styles["Heading3"]))
-            story.append(Paragraph(_pdf_safe(f"Avant : {inv.get('before', '')}<br/>Après : {inv.get('after', '')}"), normal))
+            story.append(Paragraph(f"Avant : {_html.escape(_pdf_safe(str(inv.get('before', ''))))}<br/>"
+                                   f"Après : {_html.escape(_pdf_safe(str(inv.get('after', ''))))}", normal))
             rows_i = [[{"fail": "Anomalie", "warn": "À vérifier"}.get(f["level"], f["level"]), _pdf_safe(f["label"]),
                        _pdf_safe(f.get("detail", ""))] for f in inv.get("findings", [])]
             if rows_i:
@@ -624,7 +630,7 @@ def export_pdf(results: List[BenchmarkResult], out_dir: str,
         charts = _pdf_multi_gpu_charts(r, 182*mm, 46*mm) if gpu_rows else []
         if charts:
             story.append(PageBreak())
-            story.append(Paragraph(f"Graphiques — {r.name}", h2))
+            story.append(Paragraph(f"Graphiques — {_html.escape(str(r.name))}", h2))
             for ch in charts:
                 story.append(ch); story.append(Spacer(1, 3*mm))
         else:

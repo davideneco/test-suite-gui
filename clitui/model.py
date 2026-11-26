@@ -24,8 +24,8 @@ _LABELS = {
 }
 _CHOICES = {
     "cpu_stressor": None,           # rempli depuis stress_profiles.STRESS_STRESSORS
-    "mode": ["all", "compute", "memory"], "verification": ["max", "balanced", "fast"],
-    "precision": ["float", "double", "tensor"], "method": ["auto", "nvbandwidth", "clpeak", "both"],
+    "mode": ["power", "all", "compute", "memory"], "verification": ["max", "balanced", "power"],
+    "precision": ["float", "double"], "method": ["auto", "nvbandwidth", "clpeak", "both"],
 }
 _HINTS = {
     "cpu_workers": "« auto » = tous les threads ; sinon un nombre", "vm_bytes": "ex. 512M, 2G, 70% (0 = aucun)",

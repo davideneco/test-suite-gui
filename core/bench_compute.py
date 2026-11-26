@@ -236,6 +236,7 @@ def parse_clpeak_devices(text: str) -> list:
     return out
 
 
+@with_fault_watch
 def bench_gpu_vram_bandwidth(
     buffer_size_mb: int = 2048,
     iterations: int = 5,
@@ -751,6 +752,10 @@ def _stream_peak_tool(cmd: list, env: dict, parse_line, label: str,
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                try:
+                    proc.wait(timeout=3)
+                except Exception:
+                    pass
             rc = proc.returncode if proc.returncode is not None else -3
             if done and passes is not None and n:
                 passes.append("".join(pass_lines))
@@ -763,6 +768,7 @@ def _stream_peak_tool(cmd: list, env: dict, parse_line, label: str,
         rc = -1
     except Exception as e:
         lines.append(f"Erreur : {e}\n")
+        rc = -3
     finally:
         stop_event.set()
         poll_thread.join(timeout=2.0)
@@ -1413,12 +1419,16 @@ def bench_gpu_oclburn(
     if errlines:
         metrics["erreurs_detail"] = errlines[:5]
     score = round(statistics.median(fp32), 1) if fp32 else None
-    status = "stopped" if killed else ("ok" if results and not fails else "error")
+    has_hw_err = bool(tot_c or tot_m)
+    status = "stopped" if killed else ("ok" if results and not fails and not has_hw_err else "error")
     notes = ""
     if status == "error":
-        notes = ("; ".join(fails) if fails else "oclburn n'a retourné aucun résultat") + " — voir la sortie brute"
+        if has_hw_err and not fails:
+            notes = f"{tot_c} erreur(s) de calcul et {tot_m} erreur(s) mémoire détectée(s) : GPU défectueux ou instable"
+        else:
+            notes = ("; ".join(fails) if fails else "oclburn n'a retourné aucun résultat") + " — voir la sortie brute"
         metrics["erreur"] = notes
-    elif tot_c or tot_m:
+    elif has_hw_err:
         notes = f"{tot_c} erreur(s) de calcul et {tot_m} erreur(s) mémoire détectée(s) : GPU défectueux ou instable"
     if cb: cb(100, "Terminé")
     return BenchmarkResult(name, "GPU", score, "GFLOPS", elapsed, out, metrics=metrics, status=status,

@@ -378,21 +378,6 @@ def bench_stress_profile(
     # Garde-fou : durée demandée × 1,5 + 5 min. En CLI libre sans --timeout la durée est inconnue : pas de limite imposée.
     hard_limit_s = None if (cli_only and not locals().get("parsed_timeout")) else int(time_s * 1.5) + 300
 
-    if cb: cb(5, "Demarrage stress-ng…")
-    _reset_power_cache()
-
-    series: dict = {"t": [], "temp": [], "temp_s1": [], "freq": [], "freq_s1": [],
-                    "cpu_pct": [], "power": [], "power_s1": [], "ram_temp": [], "ram_power": []}
-    if vm_workers or re.search(r"--(vm|vm-bytes|mmap|stream)\b", stress_ng_cli_args or ""):
-        # Occupation de la mémoire pendant le test (psutil, universel) : preuve que la charge remplit bien la RAM
-        series["ram_used_gb"] = []
-    stop_event = threading.Event()
-    poll_thread = threading.Thread(target=_poll_cpu_sensors,
-                                   args=(series, stop_event, t0, series_cb),
-                                   daemon=True)
-    poll_thread.start()
-    _log_window_wait(stop_event, LOG_PRE_SECONDS)
-
     if cli_only:
         pass
     else:
@@ -410,6 +395,21 @@ def bench_stress_profile(
             except ValueError as e:
                 return BenchmarkResult("Stress profil", "CPU + RAM", None, "bogo-ops/s", 0, str(e), status="error",
                                        metrics={"erreur": f"Options CLI stress-ng invalides: {e}"})
+
+    if cb: cb(5, "Demarrage stress-ng…")
+    _reset_power_cache()
+
+    series: dict = {"t": [], "temp": [], "temp_s1": [], "freq": [], "freq_s1": [],
+                    "cpu_pct": [], "power": [], "power_s1": [], "ram_temp": [], "ram_power": []}
+    if vm_workers or re.search(r"--(vm|vm-bytes|mmap|stream)\b", stress_ng_cli_args or ""):
+        # Occupation de la mémoire pendant le test (psutil, universel) : preuve que la charge remplit bien la RAM
+        series["ram_used_gb"] = []
+    stop_event = threading.Event()
+    poll_thread = threading.Thread(target=_poll_cpu_sensors,
+                                   args=(series, stop_event, t0, series_cb),
+                                   daemon=True)
+    poll_thread.start()
+    _log_window_wait(stop_event, LOG_PRE_SECONDS)
 
     killed = False
     timed_out = False
@@ -747,7 +747,7 @@ def get_hardware_report() -> dict:
         if m: cpu["coeurs_par_socket"] = int(m.group(1))
     except Exception:
         pass
-    fi = psutil.cpu_freq()
+    fi = psutil.cpu_freq() if psutil else None
     if fi:
         cpu["freq_max_mhz"] = round(fi.max)
         cpu["freq_min_mhz"] = round(fi.min)

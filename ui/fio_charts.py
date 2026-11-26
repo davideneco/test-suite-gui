@@ -744,7 +744,7 @@ class FioResultPanel(Gtk.Box):
             riops = _f("lecture_IOPS","read_IOPS")
             wiops = _f("ecriture_IOPS","write_IOPS")
             lines.append(
-                f"<b>{s['timestamp']}</b>  {s['label']}  —  "
+                f"<b>{GLib.markup_escape_text(str(s['timestamp']))}</b>  {GLib.markup_escape_text(str(s['label']))}  —  "
                 f"R:{r_bw:.0f} W:{w_bw:.0f} MiB/s  |  "
                 f"R:{riops:.0f} W:{wiops:.0f} IOPS")
         self._hist_lbl.set_markup(
