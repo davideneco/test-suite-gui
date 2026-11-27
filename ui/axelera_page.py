@@ -386,28 +386,6 @@ class AxeleraPage(Gtk.Box):
         row.append(badge)
         header.append(row)
 
-        # Bandeau SDK / pilote / avertissement
-        self._warn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        self._warn_box.add_css_class("warn-card")
-        wh = Gtk.Box(spacing=8)
-        wi = Gtk.Label()
-        wi.set_markup('<span foreground="#f9e2af" size="large">⚠</span>')
-        self._warn_lbl = Gtk.Label(halign=Gtk.Align.START, wrap=True, hexpand=True, xalign=0)
-        wh.append(wi)
-        wh.append(self._warn_lbl)
-        self._warn_box.append(wh)
-
-        wb = Gtk.Box(spacing=8)
-        btn_sdk = Gtk.Button(label="📁 Dossier Voyager SDK / venv…")
-        btn_sdk.connect("clicked", self._on_browse_sdk)
-        self._btn_copy_diag = Gtk.Button(label="📋 Copier commande installation SDK")
-        self._btn_copy_diag.connect("clicked", self._on_copy_install)
-        wb.append(btn_sdk)
-        wb.append(self._btn_copy_diag)
-        self._warn_box.append(wb)
-        self._warn_box.set_visible(False)
-        header.append(self._warn_box)
-
         # Barre d'actions fixe
         br = Gtk.Box(spacing=10)
         self._btn_run = Gtk.Button(label="▶  Lancer le test")
@@ -442,10 +420,37 @@ class AxeleraPage(Gtk.Box):
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroll.set_vexpand(True)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        box.set_margin_top(18)
+        box.set_margin_top(14)
         box.set_margin_start(28)
         box.set_margin_end(28)
         box.set_margin_bottom(24)
+
+        # 0. Bandeau diagnostic compact (dans le corps défilant pour ne pas bloquer la hauteur d'écran)
+        self._warn_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self._warn_box.add_css_class("warn-card")
+        wh = Gtk.Box(spacing=8)
+        wi = Gtk.Label()
+        wi.set_markup('<span foreground="#f9e2af" size="large">⚠</span>')
+        self._warn_lbl = Gtk.Label(halign=Gtk.Align.START, wrap=True, hexpand=True, xalign=0)
+        btn_hide_warn = Gtk.Button(label="✕")
+        btn_hide_warn.set_tooltip_text("Masquer ce bandeau jusqu'à la prochaine actualisation")
+        btn_hide_warn.connect("clicked", lambda *_: self._warn_box.set_visible(False))
+        btn_hide_warn.set_valign(Gtk.Align.START)
+        wh.append(wi)
+        wh.append(self._warn_lbl)
+        wh.append(btn_hide_warn)
+        self._warn_box.append(wh)
+
+        wb = Gtk.Box(spacing=8)
+        btn_sdk = Gtk.Button(label="📁 Dossier Voyager SDK / venv…")
+        btn_sdk.connect("clicked", self._on_browse_sdk)
+        self._btn_copy_diag = Gtk.Button(label="📋 Copier commande installation SDK")
+        self._btn_copy_diag.connect("clicked", self._on_copy_install)
+        wb.append(btn_sdk)
+        wb.append(self._btn_copy_diag)
+        self._warn_box.append(wb)
+        self._warn_box.set_visible(False)
+        box.append(self._warn_box)
 
         # 1. État SDK & Cartes détectées + Télémétrie live
         telem_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -612,7 +617,8 @@ class AxeleraPage(Gtk.Box):
         self._score_val = Gtk.Label(label="—")
         self._score_val.add_css_class("score-value")
         self._score_val.set_halign(Gtk.Align.CENTER)
-        self._score_unit = Gtk.Label(label="")
+        self._score_unit = Gtk.Label(label="", wrap=True)
+        self._score_unit.set_justify(Gtk.Justification.CENTER)
         self._score_unit.add_css_class("score-unit")
         self._score_unit.set_halign(Gtk.Align.CENTER)
         self._progress = Gtk.ProgressBar()
@@ -884,9 +890,14 @@ class AxeleraPage(Gtk.Box):
         if devs:
             for d in devs:
                 idx = str(d["index"])
+                ok_dev = bool(d.get("axdevice_ok", True))
                 cb = Gtk.CheckButton(label=f"[{idx}] {d.get('model', 'Metis')} ({d.get('bdf') or d.get('name', '')})")
+                if not ok_dev:
+                    cb.set_sensitive(False)
+                    cb.set_tooltip_text("Carte non initialisée par axdevice — impossible à cibler")
                 self._targets_box.append(cb)
-                self._target_checks.append((idx, cb))
+                if ok_dev:
+                    self._target_checks.append((idx, cb))
         else:
             self._targets_box.append(self._lbl("Aucune carte détectée (mode libre)", "bench-subtitle"))
 
@@ -1117,7 +1128,15 @@ class AxeleraPage(Gtk.Box):
                 self._btn_dl_model.set_sensitive(True)
                 self._append_log(msg)
                 if ok:
-                    self._model_entry.set_text(model_id)
+                    comp = next(
+                        (
+                            m["path"]
+                            for m in ax.discover_models()
+                            if m.get("kind") == "compiled" and model_id in (m.get("path") or "")
+                        ),
+                        None,
+                    )
+                    self._model_entry.set_text(comp or model_id)
                     self._trigger_discovery(force=True)
                     self.win._set_status(f"Modèle {model_id} prêt")
                 else:
@@ -1192,6 +1211,7 @@ class AxeleraPage(Gtk.Box):
         self._btn_run.set_sensitive(True)
         self._btn_stop.set_sensitive(False)
 
+        reason = (result.notes or (result.metrics or {}).get("erreur") or "").strip()
         if result.status == "ok":
             if result.score is not None:
                 self._score_val.set_markup(
@@ -1209,16 +1229,17 @@ class AxeleraPage(Gtk.Box):
             self._progress.set_text("Arrêté")
         elif result.status == "skipped":
             self._score_val.set_markup('<span foreground="#f9e2af" size="xx-large">N/D</span>')
-            self._score_unit.set_text("Outil ou modèle absent")
-            self._progress.set_text("Ignoré")
+            self._score_unit.set_text(reason or "Outil ou modèle absent")
+            self._progress.set_text("Ignoré — voir motif ci-dessous" if reason else "Ignoré")
         else:
             self._score_val.set_markup('<span foreground="#f38ba8" size="xx-large">ERR</span>')
-            self._score_unit.set_text(result.notes or "Erreur")
+            self._score_unit.set_text(reason or "Erreur")
             self._progress.set_text("Erreur")
 
         self._populate_metrics(result)
-        if result.raw_output and not self._log_buf.get_char_count():
-            self._log_buf.set_text(result.raw_output[:8000])
+        log_txt = (result.raw_output or reason or "").strip()
+        if log_txt and not self._log_buf.get_char_count():
+            self._log_buf.set_text(log_txt[:8000])
         self._btn_export.set_sensitive(True)
         save_to_history([result])
         self.win._on_bench_result(result)

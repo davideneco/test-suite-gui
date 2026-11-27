@@ -171,7 +171,11 @@ def build_axelera_command(
         medias = ax.discover_media(sdk)
         media = medias[0] if medias else ""
     if not media:
-        return [], None, "Aucune source vidéo/média spécifiée ou trouvée dans `<sdk>/media/` pour `inference.py`."
+        return [], None, (
+            "Aucune source vidéo/média trouvée pour `inference.py`. "
+            "Sélectionnez un modèle compilé (`model.json`) ou cliquez sur ⬇ Télécharger (`axdownloadmodel`), "
+            "ou indiquez une vidéo/image dans « Source vidéo / média »."
+        )
     py = ax.find_python_for_sdk()
     cmd = [py, inf_py, model, media, "--no-display", "--show-host-fps"]
     if int(aipu_cores or 0) > 0:
@@ -202,15 +206,18 @@ def bench_axelera_stress(
     devs_arg = (target_devices or target_gpus or "").strip()
     eff_engine, resolved_model, mod_err = _resolve_model_and_engine(model_path, engine, sdk_dir)
     if mod_err:
+        if log_cb:
+            log_cb(f"Ignoré : {mod_err}")
         return BenchmarkResult(
             "Axelera — Chauffe & Stabilité AIPU",
             "Axelera AI",
             None,
             "FPS",
             0.0,
-            "",
+            mod_err,
             status="skipped",
             metrics={"erreur": mod_err},
+            notes=mod_err,
         )
 
     cmd, cwd, cmd_err = build_axelera_command(
@@ -225,15 +232,18 @@ def bench_axelera_stress(
         extra_args=extra_args,
     )
     if cmd_err:
+        if log_cb:
+            log_cb(f"Ignoré : {cmd_err}")
         return BenchmarkResult(
             "Axelera — Chauffe & Stabilité AIPU",
             "Axelera AI",
             None,
             "FPS",
             0.0,
-            "",
+            cmd_err,
             status="skipped",
             metrics={"erreur": cmd_err},
+            notes=cmd_err,
         )
 
     cmd_str = " ".join(shlex.quote(c) for c in cmd)

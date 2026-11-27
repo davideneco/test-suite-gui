@@ -1191,14 +1191,25 @@ def discover_models(sdk_dir: Optional[str] = None) -> List[Dict]:
 
     # 1. Modèles compilés locaux (build/**/model.json, ~/.cache/axelera/**/model.json, etc.)
     search_roots = []
+    sdk_cands = []
     if sdk:
-        search_roots.extend([os.path.join(sdk, "build"), os.path.join(sdk, "models"), os.path.join(sdk, "exported")])
+        sdk_cands.append(sdk)
+    for other in _candidate_sdk_dirs():
+        if other not in sdk_cands:
+            sdk_cands.append(other)
+    for sd in sdk_cands:
+        for sub in ("build", "models", "exported"):
+            p = os.path.join(sd, sub)
+            if p not in search_roots:
+                search_roots.append(p)
     for home in _candidate_homes():
-        search_roots.extend([
+        for p in (
             os.path.join(home, ".cache", "axelera"),
             os.path.join(home, "axelera_models"),
             os.path.join(home, "build"),
-        ])
+        ):
+            if p not in search_roots:
+                search_roots.append(p)
 
     for root in search_roots:
         if not os.path.isdir(root):
@@ -1277,17 +1288,28 @@ def discover_models(sdk_dir: Optional[str] = None) -> List[Dict]:
 
 
 def discover_media(sdk_dir: Optional[str] = None) -> List[str]:
-    """Trouve les vidéos / images de test présentes dans le dossier `media/` du SDK."""
+    """Trouve les vidéos / images de test présentes dans `media/` des SDK ou caches détectés."""
     sdk = sdk_dir or find_sdk_dir()
     found: List[str] = []
-    if not sdk:
-        return found
-    mdir = os.path.join(sdk, "media")
-    if not os.path.isdir(mdir):
-        return found
-    for fn in sorted(os.listdir(mdir)):
-        if fn.lower().endswith((".mp4", ".mkv", ".avi", ".mov", ".jpg", ".jpeg", ".png")):
-            found.append(os.path.join(mdir, fn))
+    media_dirs: List[str] = []
+    if sdk:
+        media_dirs.append(os.path.join(sdk, "media"))
+    for sd in _candidate_sdk_dirs():
+        md = os.path.join(sd, "media")
+        if md not in media_dirs:
+            media_dirs.append(md)
+    for home in _candidate_homes():
+        md = os.path.join(home, ".cache", "axelera", "media")
+        if md not in media_dirs:
+            media_dirs.append(md)
+    for mdir in media_dirs:
+        if not os.path.isdir(mdir):
+            continue
+        for fn in sorted(os.listdir(mdir)):
+            if fn.lower().endswith((".mp4", ".mkv", ".avi", ".mov", ".jpg", ".jpeg", ".png")):
+                full = os.path.join(mdir, fn)
+                if full not in found:
+                    found.append(full)
     return found
 
 
