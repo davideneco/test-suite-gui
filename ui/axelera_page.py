@@ -290,6 +290,7 @@ class AxeleraPage(Gtk.Box):
         self._devices: List[Dict] = []
         self._models: List[Dict] = []
         self._medias: List[str] = []
+        self._last_status: Dict = {}
         self._target_checks: List = []
         self._refresh_tag: Optional[int] = None
         self._reading = False
@@ -307,10 +308,16 @@ class AxeleraPage(Gtk.Box):
             l.add_css_class(css)
         return l
 
-    def _pick_path(self, title: str, folder: bool, callback) -> None:
+    def _pick_path(self, title: str, folder: bool, callback, initial_dir: Optional[str] = None) -> None:
+        from gi.repository import Gio
         if hasattr(Gtk, "FileDialog"):
             dlg = Gtk.FileDialog()
             dlg.set_title(title)
+            if initial_dir and os.path.isdir(initial_dir):
+                try:
+                    dlg.set_initial_folder(Gio.File.new_for_path(initial_dir))
+                except Exception:
+                    pass
 
             def _done(d, res):
                 try:
@@ -332,6 +339,11 @@ class AxeleraPage(Gtk.Box):
                 accept_label="Sélectionner",
                 cancel_label="Annuler",
             )
+            if initial_dir and os.path.isdir(initial_dir):
+                try:
+                    dlg.set_current_folder(Gio.File.new_for_path(initial_dir))
+                except Exception:
+                    pass
 
             def _resp(d, resp):
                 if resp == Gtk.ResponseType.ACCEPT:
@@ -388,10 +400,10 @@ class AxeleraPage(Gtk.Box):
         wb = Gtk.Box(spacing=8)
         btn_sdk = Gtk.Button(label="📁 Dossier Voyager SDK / venv…")
         btn_sdk.connect("clicked", self._on_browse_sdk)
-        btn_copy = Gtk.Button(label="📋 Copier commande installation SDK")
-        btn_copy.connect("clicked", self._on_copy_install)
+        self._btn_copy_diag = Gtk.Button(label="📋 Copier commande installation SDK")
+        self._btn_copy_diag.connect("clicked", self._on_copy_install)
         wb.append(btn_sdk)
-        wb.append(btn_copy)
+        wb.append(self._btn_copy_diag)
         self._warn_box.append(wb)
         self._warn_box.set_visible(False)
         header.append(self._warn_box)
@@ -731,8 +743,8 @@ class AxeleraPage(Gtk.Box):
             ax.forget_cache()
 
         def work():
-            st = ax.sdk_status()
             devs = ax.list_devices(timeout=4.0)
+            st = ax.sdk_status()
             models = ax.discover_models(sdk_dir=st.get("sdk_dir") or None)
             medias = ax.discover_media(sdk_dir=st.get("sdk_dir") or None)
             telem = ax.poll_telemetry(timeout=2.5)
@@ -747,24 +759,71 @@ class AxeleraPage(Gtk.Box):
         self._devices = devs
         self._models = models
         self._medias = medias
+        self._last_status = st or {}
 
-        drv_txt = f"metis {st['driver_version'] or 'chargé'}" if st["driver_loaded"] else "pilote metis absent"
-        sdk_txt = f"SDK {st['sdk_version'] or 'détecté'}" if st["tools"].get("axdevice") else "Voyager SDK absent"
+        drv_name = st.get("driver_name") or "metis"
+        drv_txt = f"{drv_name} {st['driver_version'] or 'chargé'}" if st.get("driver_loaded") else "pilote metis absent"
+        detected_sdks = st.get("detected_sdks") or []
+        if st.get("sdk_dir"):
+            sdk_base = os.path.basename(st["sdk_dir"])
+            sdk_txt = f"SDK {st['sdk_version'] or sdk_base}"
+            if not st.get("tools", {}).get("axdevice"):
+                sdk_txt += " (outils CLI absents)"
+            if len(detected_sdks) > 1:
+                sdk_txt += f" · {len(detected_sdks)} SDK détectés"
+        else:
+            sdk_txt = "Voyager SDK absent"
         srv_txt = "axsystemserver actif" if st.get("axsystemserver_active") else "axsystemserver inactif"
         self._sdk_badge.set_text(f"{drv_txt} · {sdk_txt} · {srv_txt}")
 
-        # Bandeau avertissement si outil ou driver manquant
+        # Bandeau avertissement détaillé et actionnable
         issues = []
         if not devs:
             issues.append("Aucune carte Axelera Metis (PCI 1f9d) détectée sur cette machine.")
-        if not st["driver_loaded"]:
-            issues.append("Module noyau `metis` non chargé (/sys/class/metis absent).")
-        if not st["tools"].get("axdevice"):
-            issues.append("Outils Voyager SDK (`axdevice`, `axrunmodel`) introuvables : sélectionnez le dossier SDK/venv.")
+        if not st.get("driver_loaded"):
+            krel = st.get("kernel_release") or ""
+            if devs:
+                hint = (
+                    f"{len(devs)} carte(s) PCIe 1f9d détectée(s), mais aucun module noyau Axelera n'est chargé "
+                    f"pour Linux {krel} (/sys/class/metis et lsmod vides)."
+                )
+            else:
+                hint = "Module noyau `metis` non chargé (/sys/class/metis absent)."
+            if st.get("dkms_present"):
+                hint += " Essayez : `sudo modprobe metis` (ou `dkms status`)."
+            elif st.get("tools", {}).get("axdevice"):
+                hint += " Installez le pilote : `axdevice driver --install`."
+            issues.append(hint)
+        if not st.get("tools", {}).get("axdevice"):
+            if st.get("sdk_dir"):
+                other_paths = [
+                    f"{d['path']} ({d.get('version') or '?'})"
+                    for d in detected_sdks
+                    if d["path"] != st.get("sdk_dir")
+                ]
+                msg = (
+                    f"Outils CLI (`axdevice`, `axrunmodel`) introuvables dans `{st['sdk_dir']}` "
+                    f"(ni son venv)."
+                )
+                if other_paths:
+                    msg += " Autres SDK détectés : " + ", ".join(other_paths[:3]) + "."
+                msg += " Sélectionnez le bon dossier SDK/venv."
+                issues.append(msg)
+            else:
+                issues.append("Outils Voyager SDK (`axdevice`, `axrunmodel`) introuvables : sélectionnez le dossier SDK/venv.")
+        if st.get("axdevice_error"):
+            issues.append(f"Erreur `axdevice` : {st['axdevice_error']}")
+        if st.get("axsystemserver_installed") and not st.get("axsystemserver_active"):
+            issues.append("Service `axsystemserver` inactif (sondes temp/puissance indisponibles sans `sudo systemctl enable --now axsystemserver`).")
+
         if issues:
             self._warn_lbl.set_markup(
                 f'<span foreground="#f9e2af">{GLib.markup_escape_text(" ".join(issues))}</span>'
             )
+            if devs and (st.get("sdk_dir") or st.get("axsystemserver_installed")):
+                self._btn_copy_diag.set_label("📋 Copier commandes diag / activation pilote")
+            else:
+                self._btn_copy_diag.set_label("📋 Copier commande installation SDK")
             self._warn_box.set_visible(True)
         else:
             self._warn_box.set_visible(False)
@@ -884,9 +943,13 @@ class AxeleraPage(Gtk.Box):
             self._bar_temp.set_fraction(max(0.0, min(1.0, float(temp_c) / ax.TEMP_SHUTDOWN_C)))
             self._bar_temp.set_text(f"{temp_c:.1f} °C / {ax.TEMP_SHUTDOWN_C:.0f} °C")
         else:
-            self._tv["temp"].set_text("— (activer axsystemserver pour les sondes live)")
+            if not (self._last_status or {}).get("driver_loaded"):
+                self._tv["temp"].set_text("— (pilote metis non chargé)")
+                self._bar_temp.set_text("Pilote noyau metis non chargé")
+            else:
+                self._tv["temp"].set_text("— (activer axsystemserver pour les sondes live)")
+                self._bar_temp.set_text("Température non exposée sans axsystemserver")
             self._bar_temp.set_fraction(0.0)
-            self._bar_temp.set_text("Température non exposée sans axsystemserver")
 
         self._tv["power"].set_text(_fmt(td.get("power_w"), " W", 2))
         clk = td.get("clock_mhz") or (dev_info or {}).get("clock_mhz")
@@ -948,32 +1011,51 @@ class AxeleraPage(Gtk.Box):
             self._trigger_discovery(force=True)
             self.win._show_dialog("Voyager SDK configuré", f"Dossier enregistré :\n{path}")
 
-        self._pick_path("Sélectionner le dossier voyager-sdk ou son venv", True, chosen)
+        cur_sdk = ax.find_sdk_dir()
+        init_dir = os.path.dirname(cur_sdk) if cur_sdk and os.path.isdir(os.path.dirname(cur_sdk)) else os.path.expanduser("~")
+        self._pick_path("Sélectionner le dossier voyager-sdk ou son venv", True, chosen, initial_dir=init_dir)
 
     def _on_browse_model(self, _btn) -> None:
         def chosen(path):
             if path:
                 self._model_entry.set_text(path)
 
-        self._pick_path("Charger un modèle Axelera (model.json, .axm, .axe, .yaml)", False, chosen)
+        self._pick_path("Charger un modèle Axelera (model.json, .axm, .axe, .yaml)", False, chosen, initial_dir=ax.find_sdk_dir() or None)
 
     def _on_browse_media(self, _btn) -> None:
         def chosen(path):
             if path:
                 self._media_entry.set_text(path)
 
-        self._pick_path("Sélectionner une vidéo ou image de test", False, chosen)
+        self._pick_path("Sélectionner une vidéo ou image de test", False, chosen, initial_dir=ax.find_sdk_dir() or None)
 
     def _on_copy_install(self, _btn) -> None:
-        cmd = (
-            "git clone https://github.com/axelera-ai-hub/voyager-sdk.git\n"
-            "cd voyager-sdk && ./install-dependencies.sh\n"
-            "python3 -m venv venv && source venv/bin/activate\n"
-            "pip install --extra-index-url https://software.axelera.ai/artifactory/api/pypi/axelera-pypi/simple axelera-rt axelera-devkit[all]\n"
-            "axdevice driver --install"
-        )
+        st = self._last_status or {}
+        if self._devices and (st.get("sdk_dir") or st.get("axsystemserver_installed")):
+            sdk_path = st.get("sdk_dir") or "~/voyager-sdk"
+            cmd = (
+                f"# 1. Vérifier / charger le pilote noyau metis (noyau {st.get('kernel_release') or '$(uname -r)'})\n"
+                "dkms status\n"
+                "sudo modprobe metis\n"
+                "ls -la /sys/class/metis /dev/metis*\n"
+                "# 2. Activer le service de télémétrie\n"
+                "sudo systemctl enable --now axsystemserver\n"
+                "# 3. Vérifier les outils du SDK\n"
+                f"source {sdk_path}/venv/bin/activate 2>/dev/null || true\n"
+                "which axdevice && axdevice"
+            )
+            msg = "Commandes de diagnostic / activation pilote copiées dans le presse-papiers"
+        else:
+            cmd = (
+                "git clone https://github.com/axelera-ai-hub/voyager-sdk.git\n"
+                "cd voyager-sdk && ./install-dependencies.sh\n"
+                "python3 -m venv venv && source venv/bin/activate\n"
+                "pip install --extra-index-url https://software.axelera.ai/artifactory/api/pypi/axelera-pypi/simple axelera-rt axelera-devkit[all]\n"
+                "axdevice driver --install"
+            )
+            msg = "Procédure d'installation Voyager SDK copiée dans le presse-papiers"
         self.get_clipboard().set(cmd)
-        self.win._set_status("Procédure d'installation Voyager SDK copiée dans le presse-papiers")
+        self.win._set_status(msg)
 
     def _on_download_model(self, _btn) -> None:
         model_id = self._zoo_dl_combo.get_active_id() or "yolov8s-coco-onnx"

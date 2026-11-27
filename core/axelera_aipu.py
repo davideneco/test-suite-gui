@@ -47,6 +47,7 @@ TEMP_SHUTDOWN_C = 120.0
 _TOOL_CACHE_LOCK = threading.Lock()
 _TOOL_PATH_CACHE: Dict[str, Tuple[float, str]] = {}
 _LAST_TELEM_ERROR = ""
+_LAST_AXDEVICE_ERROR = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -95,44 +96,113 @@ def _candidate_homes() -> List[str]:
     return homes
 
 
+def _sdk_version_tuple(sdk_dir: str) -> Tuple[int, ...]:
+    """Extrait un tuple de version depuis VERSION.TXT ou le nom du dossier pour trier du plus récent au plus ancien."""
+    ver_str = ""
+    vtxt = os.path.join(sdk_dir, "VERSION.TXT")
+    if os.path.isfile(vtxt):
+        try:
+            with open(vtxt, encoding="utf-8", errors="replace") as f:
+                ver_str = f.read().strip()
+        except Exception:
+            pass
+    if not ver_str:
+        ver_str = os.path.basename(sdk_dir)
+    nums = [int(x) for x in re.findall(r"\d+", ver_str)[:4]]
+    return tuple(nums)
+
+
+def _sdk_has_tools(sdk_dir: str) -> bool:
+    """Vérifie si un dossier SDK contient un venv avec axdevice ou axrunmodel."""
+    for sub in ("venv/bin", "axelera-env/bin", ".venv/bin", "bin", "env/bin"):
+        bdir = os.path.join(sdk_dir, sub)
+        if os.path.isfile(os.path.join(bdir, "axdevice")) or os.path.isfile(os.path.join(bdir, "axrunmodel")):
+            return True
+    return False
+
+
+def _is_valid_sdk_dir(path: str) -> bool:
+    return bool(
+        path
+        and os.path.isdir(path)
+        and any(os.path.exists(os.path.join(path, f)) for f in ("inference.py", "VERSION.TXT", "ax_models", "deploy.py"))
+    )
+
+
 def _candidate_sdk_dirs() -> List[str]:
-    """Dossiers plausibles contenant le Voyager SDK (`inference.py` / `ax_models/` / `venv/`)."""
+    """Dossiers plausibles contenant un Voyager SDK (`voyager-sdk`, `voyager-sdk-*`, `/opt/axelera/sdk/*`)."""
     cfg = get_config()
-    out: List[str] = []
+    pinned: List[str] = []
     for raw in (
         cfg.get("sdk_dir"),
         os.environ.get("VOYAGER_SDK_DIR"),
         os.environ.get("AXELERA_SDK_DIR"),
     ):
         if raw and os.path.isdir(raw):
-            out.append(os.path.abspath(raw))
+            ap = os.path.abspath(raw)
+            if ap not in pinned:
+                pinned.append(ap)
+
+    discovered: List[str] = []
+
+    def add_disc(p: str) -> None:
+        if p and os.path.isdir(p):
+            ap = os.path.abspath(p)
+            if ap not in pinned and ap not in discovered:
+                discovered.append(ap)
+
     for home in _candidate_homes():
-        for sub in (
+        for pat in (
             "voyager-sdk",
-            "axelera/voyager-sdk",
-            "Desktop/voyager-sdk",
-            "Documents/voyager-sdk",
-            "Downloads/voyager-sdk",
-            "Téléchargements/voyager-sdk",
-            ".benchsuite/tools/voyager-sdk",
+            "voyager-sdk-*",
+            "axelera/voyager-sdk*",
+            "Desktop/voyager-sdk*",
+            "Documents/voyager-sdk*",
+            "Downloads/voyager-sdk*",
+            "Téléchargements/voyager-sdk*",
+            ".benchsuite/tools/voyager-sdk*",
         ):
-            p = os.path.join(home, sub)
-            if os.path.isdir(p) and p not in out:
-                out.append(p)
-    for p in sorted(glob.glob("/opt/axelera/sdk/*")):
-        if os.path.isdir(p) and p not in out:
-            out.append(p)
+            for p in sorted(glob.glob(os.path.join(home, pat))):
+                add_disc(p)
+    for pat in ("/opt/axelera/sdk/*", "/opt/axelera/voyager-sdk*"):
+        for p in sorted(glob.glob(pat)):
+            add_disc(p)
+
+    # Priorité aux SDK qui possèdent déjà axdevice/axrunmodel, puis version la plus récente
+    discovered.sort(key=lambda d: (_sdk_has_tools(d), _sdk_version_tuple(d), d), reverse=True)
+    return pinned + discovered
+
+
+def list_detected_sdks() -> List[Dict]:
+    """Retourne tous les dossiers Voyager SDK valides détectés sur la machine."""
+    out: List[Dict] = []
+    for d in _candidate_sdk_dirs():
+        if not _is_valid_sdk_dir(d):
+            continue
+        ver = ""
+        vtxt = os.path.join(d, "VERSION.TXT")
+        if os.path.isfile(vtxt):
+            try:
+                with open(vtxt, encoding="utf-8", errors="replace") as f:
+                    ver = f.read().strip()
+            except Exception:
+                pass
+        out.append({
+            "path": d,
+            "version": ver,
+            "has_tools": _sdk_has_tools(d),
+        })
     return out
 
 
 def find_sdk_dir() -> str:
-    """Retourne le premier dossier Voyager SDK valide trouvé ('' sinon)."""
+    """Retourne le meilleur dossier Voyager SDK valide trouvé ('' sinon)."""
     cfg = get_config()
     custom = str(cfg.get("sdk_dir") or "").strip()
     if custom and os.path.isdir(custom):
         return os.path.abspath(custom)
     for d in _candidate_sdk_dirs():
-        if any(os.path.exists(os.path.join(d, f)) for f in ("inference.py", "VERSION.TXT", "ax_models", "deploy.py")):
+        if _is_valid_sdk_dir(d):
             return d
     return ""
 
@@ -159,17 +229,24 @@ def _candidate_bin_dirs() -> List[str]:
     for p in (os.environ.get("VIRTUAL_ENV"), os.environ.get("AXELERA_VENV")):
         if p:
             add(os.path.join(p, "bin"))
+    for other_sdk in _candidate_sdk_dirs():
+        for sub in ("venv/bin", "axelera-env/bin", ".venv/bin", "bin", "env/bin"):
+            add(os.path.join(other_sdk, sub))
     for home in _candidate_homes():
-        for sub in (
-            "voyager-sdk/venv/bin",
-            "voyager-sdk/axelera-env/bin",
+        for pat in (
+            "voyager-sdk*/venv/bin",
+            "voyager-sdk*/axelera-env/bin",
             "axelera-env/bin",
             "axelera/venv/bin",
             ".local/bin",
         ):
-            add(os.path.join(home, sub))
-    for p in sorted(glob.glob("/opt/axelera/sdk/*/bin") + glob.glob("/opt/axelera/*/venv/bin")):
-        add(p)
+            for p in sorted(glob.glob(os.path.join(home, pat))):
+                add(p)
+    for pat in ("/opt/axelera/sdk/*/bin", "/opt/axelera/*/venv/bin", "/opt/axelera/*/bin"):
+        for p in sorted(glob.glob(pat)):
+            add(p)
+    for sys_bin in ("/usr/local/bin", "/usr/bin"):
+        add(sys_bin)
     return dirs
 
 
@@ -195,6 +272,8 @@ def find_tool(name: str) -> str:
 def find_python_for_sdk() -> str:
     """Interpréteur Python du venv Voyager SDK (pour lancer `inference.py`), repli sys.executable."""
     for d in _candidate_bin_dirs():
+        if d in ("/usr/local/bin", "/usr/bin"):
+            continue
         py = os.path.join(d, "python3")
         if os.path.isfile(py) and os.access(py, os.X_OK):
             return py
@@ -220,6 +299,10 @@ def sdk_env(extra: Optional[Dict[str, str]] = None, configure_board: Optional[bo
     if sdk:
         pp = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = os.pathsep.join([sdk] + ([pp] if pp else []))
+        lib_dirs = [p for p in (os.path.join(sdk, "lib"), os.path.join(sdk, "venv", "lib")) if os.path.isdir(p)]
+        if lib_dirs:
+            cur_ld = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = os.pathsep.join(lib_dirs + ([cur_ld] if cur_ld else []))
     if extra:
         env.update(extra)
     return env
@@ -242,9 +325,10 @@ def _run(cmd: List[str], timeout: float = 8.0, cwd: Optional[str] = None,
 
 
 def sdk_status() -> Dict:
-    """État synthétique du pilote noyau `metis` et des outils du Voyager SDK."""
+    """État synthétique du pilote noyau `metis`, des SDK détectés et des outils Voyager."""
     drv = driver_info()
     sdk_dir = find_sdk_dir()
+    detected_sdks = list_detected_sdks()
     tools = {
         t: find_tool(t)
         for t in ("axdevice", "axrunmodel", "axmonitor", "axlogdevice", "axdownloadmodel", "axzoo", "axversion")
@@ -265,13 +349,20 @@ def sdk_status() -> Dict:
         inf_py = ""
     return {
         "driver_loaded": drv["loaded"],
+        "driver_name": drv.get("name", ""),
         "driver_version": drv["version"],
         "dev_nodes": drv["dev_nodes"],
+        "dkms_present": drv.get("dkms_present", False),
+        "kernel_release": os.uname().release,
         "sdk_dir": sdk_dir,
         "sdk_version": sdk_ver,
+        "detected_sdks": detected_sdks,
         "inference_py": inf_py,
         "tools": tools,
+        "axdevice_error": _LAST_AXDEVICE_ERROR,
         "axsystemserver_active": _is_service_active("axsystemserver"),
+        "axsystemserver_installed": os.path.exists("/usr/lib/systemd/system/axsystemserver.service")
+        or os.path.exists("/etc/systemd/system/axsystemserver.service"),
     }
 
 
@@ -287,7 +378,7 @@ def _is_service_active(name: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def driver_info() -> Dict:
-    """Lit l'état du pilote noyau Linux `metis` (/sys/class/metis/version et /dev/metis-*)."""
+    """Lit l'état du pilote noyau Linux `metis` (/sys/class/metis, /sys/module/metis, /proc/modules, DKMS)."""
     version = ""
     ver_path = "/sys/class/metis/version"
     if os.path.isfile(ver_path):
@@ -296,9 +387,39 @@ def driver_info() -> Dict:
                 version = f.read().strip()
         except Exception:
             pass
-    loaded = os.path.isdir("/sys/module/metis") or os.path.isdir("/sys/class/metis")
-    nodes = sorted(glob.glob("/dev/metis-*") + glob.glob("/dev/metis[0-9]*"))
-    return {"loaded": bool(loaded), "version": version, "dev_nodes": nodes}
+
+    drv_name = ""
+    if os.path.isdir("/sys/module/metis") or os.path.isdir("/sys/class/metis"):
+        drv_name = "metis"
+    elif os.path.isfile("/proc/modules"):
+        try:
+            with open("/proc/modules", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    mod = line.split()[0].lower()
+                    if mod in ("metis", "axl_pcie", "triton", "triton_multi_ctx"):
+                        drv_name = mod
+                        break
+        except Exception:
+            pass
+
+    nodes = sorted(
+        glob.glob("/dev/metis-*")
+        + glob.glob("/dev/metis[0-9]*")
+        + glob.glob("/dev/axelera*")
+    )
+    dkms_present = bool(
+        glob.glob("/usr/src/metis*")
+        or glob.glob("/var/lib/dkms/metis*")
+        or glob.glob("/lib/modules/*/updates/dkms/metis*.ko*")
+        or glob.glob("/lib/modules/*/extra/metis*.ko*")
+    )
+    return {
+        "loaded": bool(drv_name),
+        "name": drv_name,
+        "version": version,
+        "dev_nodes": nodes,
+        "dkms_present": dkms_present,
+    }
 
 
 def pci_devices() -> List[Dict]:
@@ -502,21 +623,27 @@ def parse_axdevice_verbose(text: str) -> Dict[int, Dict]:
 
 
 def list_devices(timeout: float = 5.0) -> List[Dict]:
-    """Fusionne la découverte `axdevice`, `lspci` (1f9d) et le module `metis`."""
+    """Fusionne la découverte `axdevice`, `lspci` (1f9d) et le module noyau (`metis`)."""
+    global _LAST_AXDEVICE_ERROR
     drv = driver_info()
     pcis = pci_devices()
     axdev_bin = find_tool("axdevice")
     ax_devs: List[Dict] = []
     verbose_map: Dict[int, Dict] = {}
+    _LAST_AXDEVICE_ERROR = ""
     if axdev_bin:
-        rc, out, _ = _run([axdev_bin], timeout=timeout)
+        rc, out, err = _run([axdev_bin], timeout=timeout)
         if rc == 0 and out:
             ax_devs = parse_axdevice_output(out)
+        elif rc != 0:
+            raw_err = (err or out or f"code retour {rc}").strip()
+            _LAST_AXDEVICE_ERROR = raw_err.splitlines()[-1][:180] if raw_err else f"code {rc}"
         if ax_devs:
             rc_v, out_v, _ = _run([axdev_bin, "-v"], timeout=timeout)
             if rc_v == 0 and out_v:
                 verbose_map = parse_axdevice_verbose(out_v)
 
+    drv_label = drv.get("name") or ("metis" if drv["loaded"] else "")
     result: List[Dict] = []
     used_bdfs = set()
     for d in ax_devs:
@@ -531,7 +658,7 @@ def list_devices(timeout: float = 5.0) -> List[Dict]:
             "pcie_gen": pci_match["pcie_gen"] if pci_match else "",
             "pcie_width": pci_match["pcie_width"] if pci_match else "",
             "pcie_speed": pci_match["pcie_speed"] if pci_match else "",
-            "driver": (pci_match["driver"] if pci_match else "") or ("metis" if drv["loaded"] else ""),
+            "driver": (pci_match["driver"] if pci_match else "") or drv_label,
             "driver_version": drv["version"],
             "axdevice_ok": True,
         }
@@ -548,7 +675,7 @@ def list_devices(timeout: float = 5.0) -> List[Dict]:
             "index": idx,
             "name": f"metis-{_short_bdf(p['bdf'])}",
             "bdf": p["bdf"],
-            "model": "Metis AIPU (non initialisé par axdevice)" if not axdev_bin else "Metis AIPU (absent d'axdevice)",
+            "model": "Metis AIPU (axdevice absent)" if not axdev_bin else "Metis AIPU (absent d'axdevice)",
             "mem_str": "",
             "mem_mb": None,
             "flver": "",
@@ -561,7 +688,7 @@ def list_devices(timeout: float = 5.0) -> List[Dict]:
             "pcie_gen": p["pcie_gen"],
             "pcie_width": p["pcie_width"],
             "pcie_speed": p["pcie_speed"],
-            "driver": p["driver"] or ("metis" if drv["loaded"] else ""),
+            "driver": p["driver"] or drv_label,
             "driver_version": drv["version"],
             "axdevice_ok": False,
         })

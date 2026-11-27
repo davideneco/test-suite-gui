@@ -29,7 +29,7 @@ from exporters.export import (export_html, export_all, save_to_history, load_his
 
 APP_ID     = "io.benchsuite.app"
 APP_NAME   = "BenchSuite"
-VERSION    = "1.0.24"
+VERSION    = "1.0.25"
 OUTPUT_DIR = os.path.expanduser("~/BenchmarkResults")
 
 _VERSION_DISPLAY: list = []
@@ -145,11 +145,14 @@ headerbar {
     font-weight: 700;
 }
 .btn-stop:hover    { background-color: #3d1515; }
-.btn-stop:disabled { opacity: 0.35; }
+.btn-stop:disabled { opacity: 0.65; background-color: #1f1212; color: #c77373; border-color: #6b2b2b; }
 
 .btn-csv  { background:#1a2a1a; color:#4caf50; border:1px solid #4caf50; border-radius:8px; padding:8px 14px; font-weight:700; font-size:12px; }
+.btn-csv:disabled  { opacity: 0.62; color: #79b87c; border-color: #2e5e31; }
 .btn-json { background:#1a2433; color:#2196f3; border:1px solid #2196f3; border-radius:8px; padding:8px 14px; font-weight:700; font-size:12px; }
+.btn-json:disabled { opacity: 0.62; color: #7bb6eb; border-color: #27537c; }
 .btn-pdf  { background:#2a1a1a; color:#f44336; border:1px solid #f44336; border-radius:8px; padding:8px 14px; font-weight:700; font-size:12px; }
+.btn-pdf:disabled  { opacity: 0.62; color: #df827b; border-color: #7c302b; }
 
 progressbar > trough { background-color:#222222; border-radius:4px; min-height:7px; }
 progressbar > trough > progress {

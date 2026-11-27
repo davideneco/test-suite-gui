@@ -175,6 +175,42 @@ class TestAxeleraFunctionalMock(unittest.TestCase):
         v_fail = compute_verdict([r_fail], {})
         self.assertEqual(v_fail["status"], "NON_CONFORME")
 
+    def test_multi_sdk_selection_prefers_tools_and_newer_version(self):
+        with tempfile.TemporaryDirectory() as home:
+            sdk_old = os.path.join(home, "voyager-sdk")
+            sdk_new = os.path.join(home, "voyager-sdk-1.9.1")
+            os.makedirs(sdk_old)
+            with open(os.path.join(sdk_old, "VERSION.TXT"), "w") as f:
+                f.write("1.5.2\n")
+            os.makedirs(os.path.join(sdk_new, "venv", "bin"))
+            with open(os.path.join(sdk_new, "VERSION.TXT"), "w") as f:
+                f.write("1.9.1\n")
+            axdev = os.path.join(sdk_new, "venv", "bin", "axdevice")
+            with open(axdev, "w") as f:
+                f.write("#!/bin/sh\necho 'libaxl missing' >&2\nexit 1\n")
+            os.chmod(axdev, 0o755)
+
+            with patch("core.axelera_aipu.get_config", return_value={}), \
+                 patch("core.axelera_aipu._candidate_homes", return_value=[home]), \
+                 patch("shutil.which", return_value=None):
+                ax.forget_cache()
+                self.assertEqual(ax.find_sdk_dir(), sdk_new)
+                sdks = ax.list_detected_sdks()
+                self.assertEqual(len(sdks), 2)
+                self.assertEqual(sdks[0]["path"], sdk_new)
+                self.assertTrue(sdks[0]["has_tools"])
+                self.assertEqual(ax.find_tool("axdevice"), axdev)
+
+                with patch("core.axelera_aipu.pci_devices", return_value=[
+                    {"bdf": "0000:03:00.0", "vendor_id": "1f9d", "device_id": "1100",
+                     "desc": "Metis AIPU", "pcie_gen": "3", "pcie_width": "4", "pcie_speed": "8.0 GT/s", "driver": ""}
+                ]):
+                    devs = ax.list_devices(timeout=2.0)
+                    st = ax.sdk_status()
+                    self.assertEqual(len(devs), 1)
+                    self.assertFalse(devs[0]["axdevice_ok"])
+                    self.assertIn("libaxl missing", st["axdevice_error"])
+
 
 if __name__ == "__main__":
     unittest.main()
