@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-VIEWER_VERSION = "1.0.21"
+VIEWER_VERSION = "1.0.22"
 DB_SCHEMA_VERSION = 1
 IGNORED_FILES = {"benchsuite.db", "benchsuite.db-wal", "benchsuite.db-shm", "benchsuite.db-journal"}
 IGNORED_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules"}

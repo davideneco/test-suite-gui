@@ -313,5 +313,136 @@ console.log('NODE_INTERACTIVE_OK');
         self.assertIn("NODE_INTERACTIVE_OK", proc.stdout)
 
 
+class TestReportParamsAndCommands(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="benchsuite_params_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_fio_multidisk_propagates_command_and_params_to_all_disks(self):
+        from core.fio_runner import _disk_metrics
+        shared = {
+            "command": "fio --rw=rw --rwmixread=70 --bs=1m --numjobs=1 --iodepth=16 --ioengine=io_uring --runtime=60",
+            "mode": "rw",
+            "rwmixread": 70,
+            "taille_bloc": "1m",
+            "iodepth": 16,
+            "jobs": 1,
+            "moteur_io": "io_uring",
+            "runtime_s": 60,
+            "pcie_links": {"periphériques": []},
+        }
+        jm0 = {"name": "job0", "lecture_MiB_s": 129.0, "ecriture_MiB_s": 130.5}
+        jm1 = {"name": "job1", "lecture_MiB_s": 56.3, "ecriture_MiB_s": 56.1}
+        jm2 = {"name": "job2", "lecture_MiB_s": 113.0, "ecriture_MiB_s": 111.4}
+
+        m0 = _disk_metrics(jm0, shared, first=True)
+        m1 = _disk_metrics(jm1, shared, first=False)
+        m2 = _disk_metrics(jm2, shared, first=False)
+
+        for m in (m0, m1, m2):
+            self.assertEqual(m["command"], shared["command"])
+            self.assertEqual(m["mode"], "rw")
+            self.assertEqual(m["taille_bloc"], "1m")
+            self.assertEqual(m["moteur_io"], "io_uring")
+            self.assertEqual(m["rwmixread"], 70)
+            self.assertNotIn("name", m)
+        self.assertIn("pcie_links", m0)
+        self.assertNotIn("pcie_links", m1)
+        self.assertNotIn("pcie_links", m2)
+
+    def test_html_storage_and_gpu_nvbandwidth_params_and_commands(self):
+        from core.fio_runner import _disk_metrics
+        shared_hdd = {
+            "command": "fio --rw=rw --rwmixread=70 --bs=1m --numjobs=1 --iodepth=16 --ioengine=io_uring --runtime=60",
+            "mode": "rw",
+            "rwmixread": 70,
+            "taille_bloc": "1m",
+            "iodepth": 16,
+            "jobs": 1,
+            "moteur_io": "io_uring",
+            "runtime_s": 60,
+        }
+        r_sda = BenchmarkResult(
+            name="fio — Benchmark HDD — Mixte Séquentiel (/dev/sda)", category="Stockage",
+            score=129.7, unit="MiB/s", duration_s=74.5, raw_output="", status="ok",
+            command=shared_hdd["command"],
+            metrics=_disk_metrics({"name": "job0", "lecture_MiB_s": 129.0, "ecriture_MiB_s": 130.5}, shared_hdd, True),
+        )
+        r_sdb = BenchmarkResult(
+            name="fio — Benchmark HDD — Mixte Séquentiel (/dev/sdb)", category="Stockage",
+            score=56.2, unit="MiB/s", duration_s=74.5, raw_output="", status="ok",
+            command=shared_hdd["command"],
+            metrics=_disk_metrics({"name": "job1", "lecture_MiB_s": 56.3, "ecriture_MiB_s": 56.1}, shared_hdd, False),
+        )
+        # Ancien rapport multi-disques sans command dans metrics mais avec system_info['test_params']
+        r_legacy = BenchmarkResult(
+            name="fio — Benchmark HDD — Mixte Séquentiel (/dev/sdc)", category="Stockage",
+            score=112.2, unit="MiB/s", duration_s=74.5, raw_output="", status="ok",
+            metrics={"lecture_MiB_s": 113.0, "ecriture_MiB_s": 111.4},
+            system_info={"disk_dev": "/dev/sdc", "test_params": "{'rw_mode': 'rw', 'bs': '1m', 'iodepth': 16, 'numjobs': 1, 'io_engine': 'io_uring', 'runtime_s': 60}"},
+        )
+        # Test GPU nvbandwidth avec télémétrie GPU et testcases
+        r_nv = BenchmarkResult(
+            name="GPU nvbandwidth", category="GPU",
+            score=285.4, unit="GB/s", duration_s=18.2, raw_output="", status="ok",
+            command="/opt/nvbandwidth/nvbandwidth --bufferSize 512 --testSamples 3 -t host_to_device_memcpy_ce device_to_host_memcpy_ce",
+            metrics={
+                "command": "/opt/nvbandwidth/nvbandwidth --bufferSize 512 --testSamples 3 -t host_to_device_memcpy_ce device_to_host_memcpy_ce",
+                "buffer_size_mb": 512,
+                "iterations": 3,
+                "extra_args": "-t host_to_device_memcpy_ce device_to_host_memcpy_ce",
+                "nvbandwidth_tests": ["host_to_device_memcpy_ce", "device_to_host_memcpy_ce"],
+                "nvbandwidth_data": [
+                    {"name": "host_to_device_memcpy_ce", "results": {"average": 280.1}},
+                    {"name": "device_to_host_memcpy_ce", "results": {"average": 290.7}},
+                ],
+                "gpu0_temp_max_c": 52.0,
+                "gpu0_power_moy_w": 95.0,
+            },
+        )
+        # Ancien test GPU — Bande passante VRAM sans command explicite
+        r_vram = BenchmarkResult(
+            name="GPU — Bande passante VRAM", category="GPU",
+            score=3100.0, unit="GB/s", duration_s=12.4, raw_output="", status="ok",
+            metrics={"vram_bw_method": "nvbandwidth", "vram_bw_source": "nvbandwidth", "gpu0_vram_bw_gbs": 3100.0},
+        )
+
+        html_path = export_html([r_sda, r_sdb, r_legacy, r_nv, r_vram], self.tmpdir, report_meta={}, system_info_data={})
+        with open(html_path, encoding="utf-8") as f:
+            doc = f.read()
+
+        # Section Stockage : les 3 disques ont bien paramètres + commande (pas de "—")
+        m_st = re.search(r'<section id="storage"[^>]*>(.*?)</section>', doc, re.S)
+        self.assertIsNotNone(m_st)
+        st_html = m_st.group(1)
+        self.assertEqual(st_html.count("Engine: io_uring"), 3)
+        self.assertEqual(st_html.count("<code class='cmd-inline'"), 3)
+        self.assertEqual(st_html.count("fio --rw=rw"), 6)
+        self.assertNotIn("<td><span class='muted'>—</span></td>", st_html)
+
+        # Section GPU : nvbandwidth et Bande passante VRAM affichent le bench, les tests et la commande
+        m_gpu = re.search(r'<section id="gpu"[^>]*>(.*?)</section>', doc, re.S)
+        self.assertIsNotNone(m_gpu)
+        gpu_html = m_gpu.group(1)
+        self.assertIn("Bench: nvbandwidth", gpu_html)
+        self.assertIn("Tests: host_to_device_memcpy_ce, device_to_host_memcpy_ce", gpu_html)
+        self.assertIn("/opt/nvbandwidth/nvbandwidth --bufferSize 512 --testSamples 3 -t host_to_device_memcpy_ce", gpu_html)
+        self.assertIn("285.4 GB/s", gpu_html)
+        self.assertIn("device_local_copy", gpu_html)
+        self.assertNotIn("<td><span class='muted'>—</span></td>", gpu_html)
+
+        # Validation syntaxique JS
+        if shutil.which("node"):
+            scripts = re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>", doc, re.S)
+            app_js = [s for s in scripts if "renderNvbandwidthTab" in s][0]
+            js_file = os.path.join(self.tmpdir, "check_nv_report.js")
+            with open(js_file, "w", encoding="utf-8") as jf:
+                jf.write(app_js)
+            proc = subprocess.run(["node", "--check", js_file], capture_output=True, text=True, timeout=15)
+            self.assertEqual(proc.returncode, 0, msg=f"Erreur syntaxe JS :\n{proc.stderr}")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -265,7 +265,13 @@ def bench_gpu_vram_bandwidth(
         return BenchmarkResult("GPU — Bande passante VRAM", "GPU", None, "GB/s", 0, "", status="skipped",
                                metrics={"erreur": msg})
     t0 = time.time()
-    metrics: dict = {"vram_bw_method": method}
+    metrics: dict = {
+        "vram_bw_method": method,
+        "buffer_size_mb": buffer_size_mb,
+        "iterations": iterations,
+    }
+    if target_gpus:
+        metrics["target_gpus"] = target_gpus
     raws, cmds, notes = [], [], []
     nv_vals, cl_devs = [], []
     status = "ok"
@@ -273,11 +279,17 @@ def bench_gpu_vram_bandwidth(
     if use_nv and has_nv:
         inner = bench_gpu_nvbandwidth(buffer_size_mb=buffer_size_mb, iterations=iterations, target_gpus=target_gpus,
                                       extra_args="-t device_local_copy", cb=cb, kill_event=kill_event, series_cb=series_cb)
-        raws.append(inner.raw_output or ""); cmds.append(inner.command); sysinfo = inner.system_info
+        raws.append(inner.raw_output or "")
+        inner_cmd = getattr(inner, "command", "") or (inner.metrics or {}).get("command", "")
+        if inner_cmd:
+            cmds.append(inner_cmd)
+        sysinfo = inner.system_info
         nv_vals = _nvbandwidth_local_values(inner.raw_output or "")
         for k, v in (inner.metrics or {}).items():
-            if re.match(r"^gpu\d+_", str(k)) or k == "series" or str(k).startswith("series_"):
+            if re.match(r"^gpu\d+_", str(k)) or k in ("series", "nvbandwidth_data", "nvbandwidth_tests", "extra_args") or str(k).startswith("series_"):
                 metrics[k] = v
+        if "nvbandwidth_tests" not in metrics:
+            metrics["nvbandwidth_tests"] = ["device_local_copy"]
         if inner.status in ("stopped", "error", "skipped") and not nv_vals:
             status = inner.status
         if not nv_vals:
@@ -285,7 +297,10 @@ def bench_gpu_vram_bandwidth(
     if use_cl and has_cl and status != "stopped" and not (kill_event and kill_event.is_set()):
         inner = bench_clpeak(target_gpus=target_gpus, test_mode="global-bandwidth", cb=cb, kill_event=kill_event,
                              series_cb=series_cb if not use_nv else None)
-        raws.append(inner.raw_output or ""); cmds.append(inner.command)
+        raws.append(inner.raw_output or "")
+        inner_cmd = getattr(inner, "command", "") or (inner.metrics or {}).get("command", "")
+        if inner_cmd:
+            cmds.append(inner_cmd)
         sysinfo = sysinfo or inner.system_info
         cl_devs = parse_clpeak_devices(inner.raw_output or "")
         if not cl_devs:
@@ -309,13 +324,16 @@ def bench_gpu_vram_bandwidth(
     vals = nv_vals or [d["global_bw_gbs"] for d in cl_devs]
     score = round(statistics.median(vals), 1) if vals else None
     metrics["vram_bw_source"] = "nvbandwidth" if nv_vals else ("clpeak" if cl_devs else "aucune")
+    cmd_joined = " && ".join(c for c in cmds if c)
+    if cmd_joined:
+        metrics["command"] = cmd_joined
     if status == "ok" and not score:
         status = "error"
     if notes:
         metrics["erreur"] = " ; ".join(notes)
     return BenchmarkResult("GPU — Bande passante VRAM", "GPU", score, "GB/s", time.time() - t0, "\n".join(raws),
                            metrics=metrics, status=status, system_info=sysinfo, notes=" ; ".join(notes),
-                           command=" && ".join(c for c in cmds if c))
+                           command=cmd_joined)
 
 
 DCGM_LEVEL_INFO = {1: ("rapide", 60, 120), 2: ("moyen", 240, 900), 3: ("long", 1200, 3600), 4: ("étendu", 5400, 14400)}

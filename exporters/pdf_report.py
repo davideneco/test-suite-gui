@@ -564,8 +564,9 @@ def export_pdf(results: List[BenchmarkResult], out_dir: str,
         info_rows = [["Champ", "Valeur"], ["Catégorie", r.category], ["Statut", r.status],
                      ["Score", f"{r.score if r.score is not None else ''} {r.unit}"], ["Durée", f"{r.duration_s:.1f} s"],
                      ["Horodatage", r.timestamp[:19].replace("T", " ")]]
-        if getattr(r, "command", ""):
-            info_rows.append(["Commande", r.command])
+        cmd_pdf = getattr(r, "command", "") or (r.metrics or {}).get("command", "")
+        if cmd_pdf:
+            info_rows.append(["Commande", str(cmd_pdf)])
         story.append(table(info_rows, [35*mm, 147*mm]))
         story.append(Spacer(1, 4*mm))
         gpu_rows = _gpu_rows_for_result(r, labels)

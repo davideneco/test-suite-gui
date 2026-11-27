@@ -428,6 +428,14 @@ def run_fio_from_params(
     result["engine_used"] = engine
     if isinstance(result.get("metrics"), dict):
         result["metrics"]["command"] = shlex.join(str(c) for c in cmd)      # la VRAIE commande (le rapport ne la reconstruit plus)
+        if runtime_s:
+            result["metrics"]["runtime_s"] = runtime_s
+        if size_expr:
+            result["metrics"]["size"] = size_expr
+        elif size_mb and size_mb > 0:
+            result["metrics"]["size"] = f"{size_mb}M"
+        if rw_mode in ("rw", "randrw", "readwrite") and rwmixread is not None:
+            result["metrics"]["rwmixread"] = rwmixread
     _nvme_bilan(result, _h0, path)
     if series and series.get("t"):
         result["series"] = series
@@ -939,6 +947,9 @@ def run_fio_suite(
 
     if suite_cmds:
         agg_metrics["command"] = "\n".join(suite_cmds)       # commandes réelles, une par sous-test
+    if suite_results:
+        agg_metrics["suite_count"] = len(suite_results)
+        agg_metrics["suite_tests"] = [s["name"] for s in suite_results]
     # Marqueurs sans information (« Multi ») : retirés, le nom du profil et les lignes par test suffisent
     for k in ("taille_bloc", "iodepth", "jobs"):
         if agg_metrics.get(k) in ("Multi", "Multi-Blocs"):
@@ -1037,3 +1048,45 @@ def run_fio_suite(
         "is_suite": True,
         "suite_results": suite_results
     }
+
+
+_OBSERVATION_KEYS = ("pcie_links", "inventory_diff", "electrical", "hardware_events", "hardware_monitor")
+_SHARED_META_KEYS = (
+    "command", "mode", "rw_mode", "taille_bloc", "bs", "size", "size_mb", "runtime_s",
+    "iodepth", "jobs", "numjobs", "moteur_io", "io_engine", "rwmixread",
+    "bssplit", "random_distribution", "blockalign", "suite_tests", "suite_count",
+    "profile_id", "profile_name",
+)
+
+
+def _disk_score(jm: dict, mode: str) -> float:
+    """Score d'un disque dans un test multi-disques : un seul sens mesuré → sa valeur ; profil mixte (rw) → moyenne ;
+    suite (lecture et écriture dans des tests distincts) → meilleur des deux."""
+    r, w = float(jm.get("lecture_MiB_s", 0) or 0), float(jm.get("ecriture_MiB_s", 0) or 0)
+    if r and w:
+        return (r + w) / 2.0 if mode in ("rw", "randrw", "readwrite") else max(r, w)
+    return r or w
+
+
+def _shared_obs(metrics: dict, rd: dict) -> dict:
+    """Relevés de la machine entière d'un test : métriques du résultat + événements matériels du résultat brut de fio."""
+    out = dict(metrics or {})
+    ev = ((rd or {}).get("hardware_events") or {}).get("events") if isinstance((rd or {}).get("hardware_events"), dict) else None
+    if ev and "hardware_events" not in out:
+        out["hardware_events"] = ev
+    return out
+
+
+def _disk_metrics(jm: dict, shared: dict, first: bool) -> dict:
+    """Métriques propres à un disque (sans « job0 ») : la commande et les paramètres FIO sont recopiés sur chaque disque,
+    tandis que les relevés machine (liens PCIe, inventaire, électronique, pannes) restent sur le premier disque uniquement."""
+    out = {k: v for k, v in dict(jm).items() if k != "name"}
+    for k in _SHARED_META_KEYS:
+        if k in shared and shared[k] not in ("", None) and k not in out:
+            out[k] = shared[k]
+    if first:
+        out.update({k: shared[k] for k in _OBSERVATION_KEYS if k in shared})
+    elif any(k in shared for k in _OBSERVATION_KEYS):
+        out["observations_groupe"] = "relevés de la machine (liens PCIe, inventaire, électronique) partagés avec le 1er disque du test"
+    return out
+

@@ -186,7 +186,7 @@ def _fio_result(name: str, rd: dict, t0: float, path: str) -> BenchmarkResult:
     m["path"] = path
     br = BenchmarkResult(name=name, category="Stockage", score=rd.get("score"), unit=rd.get("unit", "MiB/s"),
                          duration_s=rd.get("duration_s", time.time() - t0), raw_output=str(rd.get("raw", ""))[:8000],
-                         metrics=m, status=status)
+                         metrics=m, status=status, command=str(m.get("command", "") or ""))
     if rd.get("error") and status == "error":
         br.notes = str(rd["error"])[:500]
     return br
@@ -241,6 +241,12 @@ def _run_step_inner(step: Dict, cb: Optional[Callable] = None, series_cb: Option
                                       res.get("duration_s", time.time() - t0), "",
                                       metrics={k: v for k, v in res.items() if k not in ("score", "unit", "duration_s", "status")},
                                       status=res.get("status", "ok"))
+            if isinstance(res, BenchmarkResult):
+                for pk, pv in params.items():
+                    if pk not in ("cb", "series_cb", "on_series_cb", "kill_event") and pv not in ("", None) and pk not in res.metrics:
+                        res.metrics[pk] = pv
+                if not getattr(res, "command", "") and res.metrics.get("command"):
+                    res.command = str(res.metrics["command"])
             return res
 
         if "stress" in step:

@@ -18,7 +18,7 @@ def get_hardware_report():
     except Exception:
         return {}
 
-APP_VERSION = "1.0.21"
+APP_VERSION = "1.0.22"
 
 # Rapports : onglet « Séquence & électronique » (courbes de la séquence, relevés de tensions/ventilateurs), sections PDF et lignes CSV
 # correspondantes. Désactivé : les relevés restent collectés et présents dans le JSON, mais ne s'affichent plus dans HTML / PDF / CSV.

@@ -674,6 +674,36 @@ def export_html(results: List[BenchmarkResult], out_dir: str, report_meta: dict 
         suffix = sensor_map.get(raw_suffix, raw_suffix.replace("_", " "))
         return f"{gpu_name} — {suffix}"
 
+    def _parse_sys_test_params(res: BenchmarkResult) -> dict:
+        si = getattr(res, "system_info", None) or {}
+        tp = si.get("test_params")
+        if isinstance(tp, dict):
+            return tp
+        if isinstance(tp, str) and tp.strip().startswith("{"):
+            try:
+                import ast
+                parsed = ast.literal_eval(tp)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        return {}
+
+    def _nvbandwidth_test_names(m: dict, cmd_str: str = "") -> list:
+        names = []
+        raw_t = m.get("nvbandwidth_tests")
+        if isinstance(raw_t, list):
+            names = [str(x).strip() for x in raw_t if str(x).strip()]
+        if not names and isinstance(m.get("nvbandwidth_data"), list):
+            names = [str(tc.get("name", "")).strip() for tc in m["nvbandwidth_data"]
+                     if isinstance(tc, dict) and tc.get("name") and tc.get("name") != "memcpy_fallback_gen"]
+        if not names:
+            src = f"{m.get('extra_args', '')} {cmd_str}".strip()
+            mt = re.search(r"(?:^|\s)(?:-t|--testcase|-p|--testPattern)\s+([^\-]+)", src)
+            if mt:
+                names = [tok.strip() for tok in mt.group(1).split() if tok.strip()]
+        return names
+
     def _get_benchmark_command(res: BenchmarkResult) -> str:
         cmd = getattr(res, "command", "") or ""
         if cmd:
@@ -687,28 +717,49 @@ def export_html(results: List[BenchmarkResult], out_dir: str, report_meta: dict 
         target_gpus = m.get("target_gpus")
         gpu_env = f"CUDA_VISIBLE_DEVICES={target_gpus} " if target_gpus else ""
         if "gpu-fryer" in name_lower:
-            t = m.get("time_s", 30)
+            t = m.get("time_s", m.get("duration_s", 30))
             dtype = m.get("dtype", "float32")
             bf16 = "true" if dtype == "bfloat16" else "false"
             return f"{gpu_env}gpu-fryer {t} --use-bf16 {bf16}"
         elif "gpu-burn" in name_lower:
-            t = m.get("time_s", 30)
+            t = m.get("time_s", m.get("duration_s", 30))
             prec = " -d" if m.get("precision") == "double" else ""
             return f"{gpu_env}./gpu_burn {t}{prec}"
         elif "fio" in name_lower:
-            if not (m.get("rw_mode") and m.get("bs")):
+            tp = _parse_sys_test_params(res)
+            rw = m.get("rw_mode") or m.get("mode") or tp.get("rw_mode")
+            bs = m.get("bs") or m.get("taille_bloc") or tp.get("bs")
+            if not (rw and bs) or rw == "Suite":
                 return ""        # commande non enregistrée (anciens rapports) : on n'en invente pas une avec des valeurs par défaut
-            rw = m.get("rw_mode", "readwrite")
-            bs = m.get("bs", "128k")
-            sz = m.get("size") or (f"{m.get('size_mb', 512)}M")
-            rt = m.get("runtime_s", 20)
-            iod = m.get("iodepth", 1)
-            eng = m.get("io_engine", "sync")
-            return f"fio --name=bench --rw={rw} --bs={bs} --size={sz} --runtime={rt} --iodepth={iod} --ioengine={eng} --time_based --group_reporting"
+            sz = m.get("size") or tp.get("size_expr") or (f"{m.get('size_mb') or tp.get('size_mb')}M" if (m.get("size_mb") or tp.get("size_mb")) else "")
+            rt = m.get("runtime_s") or tp.get("runtime_s")
+            iod = m.get("iodepth") or tp.get("iodepth") or 1
+            nj = m.get("numjobs") or m.get("jobs") or tp.get("numjobs") or 1
+            eng = m.get("io_engine") or m.get("moteur_io") or tp.get("io_engine") or "sync"
+            dev = (getattr(res, "system_info", None) or {}).get("disk_dev") or tp.get("path") or ""
+            parts_cmd = [f"fio --rw={rw} --bs={bs} --numjobs={nj} --iodepth={iod} --ioengine={eng}"]
+            if sz:
+                parts_cmd.append(f"--size={sz}")
+            if rt:
+                parts_cmd.append(f"--runtime={rt} --time_based")
+            if dev:
+                parts_cmd.append(f"--filename={dev}")
+            return " ".join(parts_cmd)
         elif "nvbandwidth" in name_lower:
             buf = m.get("buffer_size_mb", 512)
             it = m.get("iterations", 3)
-            return f"{gpu_env}nvbandwidth --bufferSize {buf} --testSamples {it}"
+            extra = f" {m['extra_args']}" if m.get("extra_args") else ""
+            return f"{gpu_env}nvbandwidth --bufferSize {buf} --testSamples {it}{extra}"
+        elif "bande passante vram" in name_lower or m.get("vram_bw_method") or m.get("vram_bw_source"):
+            src = str(m.get("vram_bw_source") or m.get("vram_bw_method") or "nvbandwidth").lower()
+            buf = m.get("buffer_size_mb", 2048)
+            it = m.get("iterations", 5)
+            cmds_fb = []
+            if src in ("nvbandwidth", "both", "auto"):
+                cmds_fb.append(f"{gpu_env}nvbandwidth --bufferSize {buf} --testSamples {it} -t device_local_copy")
+            if src in ("clpeak", "both"):
+                cmds_fb.append(f"{gpu_env}clpeak --global-bandwidth")
+            return " && ".join(cmds_fb)
         elif "iperf" in name_lower:
             h = m.get("host", "127.0.0.1")
             p = m.get("port", 5201)
@@ -748,7 +799,7 @@ def export_html(results: List[BenchmarkResult], out_dir: str, report_meta: dict 
             return f"glmark2{off}{rend}"
         return ""
 
-    def _format_bench_params(res: BenchmarkResult) -> str:
+    def _format_bench_params(res: BenchmarkResult, cmd_str: str = "") -> str:
         m = res.metrics or {}
         parts = []
         name_lower = (res.name or "").lower()
@@ -789,29 +840,65 @@ def export_html(results: List[BenchmarkResult], out_dir: str, report_meta: dict 
             if m.get("vm_workers"): parts.append(f"VM workers: {m['vm_workers']}")
             if "time_s" in m: parts.append(f"Temps: {m['time_s']}s")
         elif "fio" in name_lower:
-            if "rw_mode" in m: parts.append(f"Mode: {m['rw_mode']}")
-            if "bs" in m: parts.append(f"BS: {m['bs']}")
-            if "size" in m or "size_mb" in m:
-                fio_size = m.get("size") or f"{m.get('size_mb')}M"
-                parts.append(f"Taille: {fio_size}")
-            if "iodepth" in m: parts.append(f"IODepth: {m['iodepth']}")
-            if "numjobs" in m: parts.append(f"Jobs: {m['numjobs']}")
-            if "io_engine" in m: parts.append(f"Engine: {m['io_engine']}")
+            tp = _parse_sys_test_params(res)
+            rw = m.get("rw_mode") or m.get("mode") or tp.get("rw_mode")
+            bs = m.get("bs") or m.get("taille_bloc") or tp.get("bs")
+            sz = m.get("size") or tp.get("size_expr") or (f"{m.get('size_mb') or tp.get('size_mb')}M" if (m.get("size_mb") or tp.get("size_mb")) else None)
+            iod = m.get("iodepth") or tp.get("iodepth")
+            nj = m.get("numjobs") or m.get("jobs") or tp.get("numjobs")
+            eng = m.get("io_engine") or m.get("moteur_io") or tp.get("io_engine")
+            rt = m.get("runtime_s") or tp.get("runtime_s")
+            mix = m.get("rwmixread") if m.get("rwmixread") is not None else tp.get("rwmixread")
+            suite_n = m.get("suite_count") or (len(m["suite_tests"]) if isinstance(m.get("suite_tests"), list) else 0)
+            if not suite_n and rw == "Suite":
+                fm_tmp = _fio_matrix(m)
+                if fm_tmp:
+                    suite_n = len(fm_tmp[1])
+            if suite_n:
+                parts.append(f"Suite: {suite_n} tests")
+            elif rw:
+                if rw in ("rw", "randrw", "readwrite") and mix is not None:
+                    parts.append(f"Mode: {rw} ({mix}% R)")
+                else:
+                    parts.append(f"Mode: {rw}")
+            if bs and str(bs) not in ("Multi", "Multi-Blocs"):
+                parts.append(f"BS: {bs}")
+            if sz:
+                parts.append(f"Taille: {sz}")
+            if iod and str(iod) != "Multi":
+                parts.append(f"IODepth: {iod}")
+            if nj and str(nj) != "Multi":
+                parts.append(f"Jobs: {nj}")
+            if rt:
+                parts.append(f"Durée: {rt}s")
+            if eng and eng != "?":
+                parts.append(f"Engine: {eng}")
         elif "dd" in name_lower:
             if "size_mb" in m: parts.append(f"Taille: {m['size_mb']}M")
             if "bs" in m: parts.append(f"BS: {m['bs']}")
             if "conv" in m: parts.append(f"Conv: {m['conv']}")
-        elif "nvbandwidth" in name_lower:
+        elif "nvbandwidth" in name_lower or "bande passante vram" in name_lower or m.get("vram_bw_method") or m.get("vram_bw_source"):
+            src = m.get("vram_bw_source") or m.get("vram_bw_method")
+            if src and src != "aucune" and "nvbandwidth" not in name_lower:
+                parts.append(f"Bench: {src}")
+            elif "nvbandwidth" in name_lower:
+                parts.append("Bench: nvbandwidth")
+            tc_names = _nvbandwidth_test_names(m, cmd_str)
+            if tc_names:
+                tc_txt = ", ".join(tc_names[:2]) + (f" (+{len(tc_names) - 2})" if len(tc_names) > 2 else "")
+                parts.append(f"Tests: {tc_txt}")
             if "buffer_size_mb" in m: parts.append(f"Buf: {m['buffer_size_mb']}M")
             if "iterations" in m: parts.append(f"Iter: {m['iterations']}")
             if "target_gpus" in m and m["target_gpus"]: parts.append(f"GPUs: {m['target_gpus']}")
         elif "gpu-burn" in name_lower:
-            if "time_s" in m: parts.append(f"Temps: {m['time_s']}s")
+            t_val = m.get("time_s", m.get("duration_s"))
+            if t_val is not None: parts.append(f"Temps: {t_val}s")
             if "precision" in m: parts.append(f"Prec: {m['precision']}")
             if "target_gpus" in m and m["target_gpus"]: parts.append(f"GPUs: {m['target_gpus']}")
         elif "gpu-fryer" in name_lower:
             if "dtype" in m: parts.append(f"Dtype: {m['dtype']}")
-            if "time_s" in m: parts.append(f"Temps: {m['time_s']}s")
+            t_val = m.get("time_s", m.get("duration_s"))
+            if t_val is not None: parts.append(f"Temps: {t_val}s")
             if "target_gpus" in m and m["target_gpus"]: parts.append(f"GPUs: {m['target_gpus']}")
         elif "clpeak" in name_lower:
             if "test_mode" in m: parts.append(f"Test: {m['test_mode']}")
@@ -1002,11 +1089,28 @@ def export_html(results: List[BenchmarkResult], out_dir: str, report_meta: dict 
             gpu_table_html = ("<table class='gpu-table'><thead><tr>" + "".join(f"<th>{_html.escape(h.replace('dT ', 'ΔT '))}</th>" for h in g_head)
                               + f"</tr></thead><tbody>{body_rows}</tbody></table>"
                               "<p class='muted' style='font-size:11px;margin-top:4px'>Valeurs moyennes en charge stabilisée (repos et 10 premières secondes exclus). ΔT = hotspot − cœur ; ! élevé (&gt; 20 °C), !! très élevé (&gt; 25 °C).</p>")
-            key_cell_html = "<span class='muted'>Synthèse par GPU ci-dessous ↓</span>"
+            nv_tcs = _nvbandwidth_test_names(r.metrics or {}, cmd_str)
+            if (r.metrics or {}).get("nvbandwidth_data") or (r.metrics or {}).get("bandwidth_moy_gb_s") is not None or (r.metrics or {}).get("vram_bw_source"):
+                bw_bits = []
+                if r.score is not None:
+                    bw_bits.append(f"<b>{_html.escape(str(r.score))} {_html.escape(r.unit or 'GB/s')}</b>")
+                if nv_tcs:
+                    tc_short = ", ".join(nv_tcs[:3]) + (f" (+{len(nv_tcs) - 3})" if len(nv_tcs) > 3 else "")
+                    bw_bits.append(_html.escape(tc_short))
+                bw_bits.append("<span class='muted'>Synthèse par GPU ↓</span>")
+                key_cell_html = " · ".join(bw_bits)
+            else:
+                key_cell_html = "<span class='muted'>Synthèse par GPU ci-dessous ↓</span>"
         bucket = _bucket_for_result(r)
-        params_txt = _format_bench_params(r)
+        params_txt = _format_bench_params(r, cmd_str)
         params_badge = f"<span class='nv-badge'>{_html.escape(params_txt)}</span>" if params_txt != "—" else ""
-        cmd_inline = f"<div style='margin-top:4px;'><code class='cmd-inline' title='{_html.escape(cmd_str)}'>{_html.escape(cmd_str)}</code></div>" if cmd_str else ""
+        cmd_inline = ""
+        if cmd_str:
+            cmd_lines = [ln.strip() for ln in cmd_str.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+            cmd_preview = cmd_lines[0] if cmd_lines else cmd_str.splitlines()[0].strip()
+            if len(cmd_lines) > 1:
+                cmd_preview = f"{cmd_preview} (+{len(cmd_lines) - 1} cmd)"
+            cmd_inline = f"<div style='margin-top:4px;'><code class='cmd-inline' title='{_html.escape(cmd_str)}'>{_html.escape(cmd_preview)}</code></div>"
         cell_params = f"{params_badge}{cmd_inline}" if (params_badge or cmd_inline) else "<span class='muted'>—</span>"
         category_rows[bucket].append(
             f"<tr><td>{idx+1}</td><td>{_html.escape(r.name)}</td><td>{_html.escape(str(r.status))}</td>"
@@ -1805,35 +1909,24 @@ function renderCompareTable(){
 
 function renderNvbandwidthTab() {
   const results = payload.results || [];
-  let nvRes = null;
-  for (const r of results) {
-    if (r.metrics && r.metrics.nvbandwidth_data) {
-      nvRes = r;
-      break;
-    }
-  }
+  const nvResults = results.filter(r => r && r.metrics && Array.isArray(r.metrics.nvbandwidth_data) && r.metrics.nvbandwidth_data.length > 0);
   const tabBtn = document.getElementById('nvbandwidthTab');
   const viewSec = document.getElementById('nvbandwidth');
-  if (!nvRes) {
+  if (!nvResults.length) {
     if (tabBtn) tabBtn.style.display = 'none';
     if (viewSec) viewSec.style.display = 'none';
     return;
   }
-  
+
   if (tabBtn) tabBtn.style.display = '';
   if (viewSec) viewSec.style.display = '';
-  
+
   const content = document.getElementById('nvbandwidthContent');
   if (!content) return;
-  
-  const testcases = nvRes.metrics.nvbandwidth_data;
-  if (!Array.isArray(testcases) || !testcases.length) {
-    content.innerHTML = '<p class="muted">Aucune donnée détaillée nvbandwidth disponible dans les métriques.</p>';
-    return;
-  }
-  
+
   let html = '';
   html += '<style>' +
+    '.nv-run-block { margin-bottom: 28px; }' +
     '.nv-testcase { margin-bottom: 32px; border-bottom: 1px solid var(--border-color); padding-bottom: 24px; }' +
     '.nv-testcase:last-child { border-bottom: none; }' +
     '.nv-title { font-size: 16px; font-weight: 700; color: #a78bfa; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }' +
@@ -1848,80 +1941,94 @@ function renderNvbandwidthTab() {
     '.nv-heatmap td.diag { background: rgba(255,255,255,.02) !important; color: rgba(255,255,255,.15); font-style: italic; }' +
     '.nv-badge { display: inline-block; font-size: 11px; background: rgba(167, 139, 250, 0.15); color: #c084fc; padding: 2px 6px; border-radius: 4px; font-family: "Fira Code", monospace; }' +
     '</style>';
-  
-  testcases.forEach(tc => {
-    const name = tc.name || "Testcase";
-    const res = tc.results || {};
-    const avg = res.average || res.mean || res.bandwidth;
-    const sum = res.sum;
-    const min = res.min;
-    const max = res.max;
-    const matrix = res.bandwidth_matrix || res.matrix;
-    const isLatency = name.toLowerCase().includes("latency") || name.toLowerCase().includes("lat");
-    const unit = isLatency ? "us" : "GB/s";
-    
-    html += '<div class="nv-testcase">';
-    html += '<div class="nv-title"><span>⚡</span> ' + escapeHtml(name) + '</div>';
-    html += '<div class="nv-grid-container">';
-    
-    html += '<div class="nv-table-wrap">';
-    html += '<div class="table-header-flex"><h4>Résumé des métriques</h4><div class="table-actions" data-html2canvas-ignore="true"><button class="action-btn" onclick="copyTableToImage(this, this.closest(\'.nv-table-wrap\').querySelector(\'table\'))">📸 Image</button><button class="action-btn" onclick="copyTableToExcel(this, this.closest(\'.nv-table-wrap\').querySelector(\'table\'))">📋 Excel</button></div></div>';
-    html += '<table><thead><tr><th>Métrique</th><th>Valeur</th></tr></thead><tbody>';
-    const bufferSize = nvRes.metrics.buffer_size_mb;
-    const iterations = nvRes.metrics.iterations;
-    const extraArgs = nvRes.metrics.extra_args;
-    if (bufferSize !== undefined) html += '<tr><td>Taille buffer</td><td><span class="nv-badge">' + bufferSize + ' Mo</span></td></tr>';
-    if (iterations !== undefined) html += '<tr><td>Itérations</td><td><span class="nv-badge">' + iterations + '</span></td></tr>';
-    if (extraArgs) html += '<tr><td>Options CLI supp.</td><td><code>' + escapeHtml(extraArgs) + '</code></td></tr>';
-    if (avg !== undefined) html += '<tr><td>Moyenne</td><td><b>' + fmt(avg) + ' ' + unit + '</b></td></tr>';
-    if (sum !== undefined) html += '<tr><td>Somme globale</td><td>' + fmt(sum) + ' ' + unit + '</td></tr>';
-    if (min !== undefined) html += '<tr><td>Valeur minimale</td><td>' + fmt(min) + ' ' + unit + '</td></tr>';
-    if (max !== undefined) html += '<tr><td>Valeur maximale</td><td>' + fmt(max) + ' ' + unit + '</td></tr>';
-    if (res.coefficient_of_variation !== undefined) html += '<tr><td>Coef. Variation (CoV)</td><td>' + fmt(res.coefficient_of_variation) + '</td></tr>';
-    html += '</tbody></table>';
-    html += '</div>';
-    
-    if (Array.isArray(matrix) && matrix.length > 0) {
-      const numGpus = matrix.length;
-      html += '<div class="nv-heatmap-wrap">';
-      html += '<div class="table-header-flex"><h4>Matrice inter-GPU (' + unit + ')</h4><div class="table-actions" data-html2canvas-ignore="true"><button class="action-btn" onclick="copyTableToImage(this, this.closest(\'.nv-heatmap-wrap\').querySelector(\'table\'))">📸 Image</button><button class="action-btn" onclick="copyTableToExcel(this, this.closest(\'.nv-heatmap-wrap\').querySelector(\'table\'))">📋 Excel</button></div></div>';
-      html += '<table class="nv-heatmap">';
-      html += '<thead><tr><th>De \\ À</th>';
-      for (let j = 0; j < numGpus; j++) {
-        html += '<th>GPU ' + j + '</th>';
-      }
-      html += '</tr></thead><tbody>';
-      
-      let maxValInMatrix = 1.0;
-      matrix.forEach(r => { if(Array.isArray(r)) r.forEach(v => { if (v && v > maxValInMatrix) maxValInMatrix = v; })});
-      
-      matrix.forEach((row, rIdx) => {
-        html += '<tr><th>GPU ' + rIdx + '</th>';
-        for (let cIdx = 0; cIdx < numGpus; cIdx++) {
-          if (rIdx === cIdx) {
-            html += '<td class="diag">—</td>';
-          } else {
-            const val = Array.isArray(row) ? row[cIdx] : undefined;
-            if (val === undefined || val === null) {
-              html += '<td class="diag">N/A</td>';
-            } else {
-              const pct = Math.min(1.0, Math.max(0.15, val / maxValInMatrix));
-              const colorBase = isLatency ? "34, 211, 238" : "167, 139, 250";
-              const fontColor = pct > 0.6 ? "#ffffff" : "#cbd5e1";
-              html += '<td style="background: rgba(' + colorBase + ', ' + pct + '); color: ' + fontColor + '; box-shadow: 0 0 10px rgba(' + colorBase + ', ' + (pct*0.2) + ');" title="GPU ' + rIdx + ' → GPU ' + cIdx + ' : ' + val + ' ' + unit + '">' + fmt(val) + '</td>';
-            }
-          }
-        }
-        html += '</tr>';
-      });
+
+  nvResults.forEach(nvRes => {
+    const testcases = nvRes.metrics.nvbandwidth_data || [];
+    const cmdText = String(nvRes.command || nvRes.metrics.command || '').trim();
+    html += '<div class="nv-run-block">';
+    html += '<h3 style="margin-bottom:8px">' + escapeHtml(nvRes.name || 'GPU nvbandwidth') + '</h3>';
+    if (cmdText) {
+      html += '<div class="bench-cmd-box"><div class="cmd-label">⌨️ Commande exécutée :</div><div class="cmd-row">'
+        + '<code class="cmd-text">' + escapeHtml(cmdText) + '</code>'
+        + '<button class="action-btn cmd-copy-btn" onclick="copyCommand(this, ' + escapeHtml(JSON.stringify(cmdText)) + ')">📋 Copier</button>'
+        + '</div></div>';
+    }
+
+    testcases.forEach(tc => {
+      const name = tc.name || "Testcase";
+      const res = tc.results || {};
+      const avg = res.average || res.mean || res.bandwidth;
+      const sum = res.sum;
+      const min = res.min;
+      const max = res.max;
+      const matrix = res.bandwidth_matrix || res.matrix;
+      const isLatency = name.toLowerCase().includes("latency") || name.toLowerCase().includes("lat");
+      const unit = isLatency ? "us" : "GB/s";
+
+      html += '<div class="nv-testcase">';
+      html += '<div class="nv-title"><span>⚡</span> ' + escapeHtml(name) + '</div>';
+      html += '<div class="nv-grid-container">';
+
+      html += '<div class="nv-table-wrap">';
+      html += '<div class="table-header-flex"><h4>Résumé des métriques</h4><div class="table-actions" data-html2canvas-ignore="true"><button class="action-btn" onclick="copyTableToImage(this, this.closest(\'.nv-table-wrap\').querySelector(\'table\'))">📸 Image</button><button class="action-btn" onclick="copyTableToExcel(this, this.closest(\'.nv-table-wrap\').querySelector(\'table\'))">📋 Excel</button></div></div>';
+      html += '<table><thead><tr><th>Métrique</th><th>Valeur</th></tr></thead><tbody>';
+      const bufferSize = nvRes.metrics.buffer_size_mb;
+      const iterations = nvRes.metrics.iterations;
+      const extraArgs = nvRes.metrics.extra_args;
+      if (bufferSize !== undefined) html += '<tr><td>Taille buffer</td><td><span class="nv-badge">' + bufferSize + ' Mo</span></td></tr>';
+      if (iterations !== undefined) html += '<tr><td>Itérations</td><td><span class="nv-badge">' + iterations + '</span></td></tr>';
+      if (extraArgs) html += '<tr><td>Options CLI supp.</td><td><code>' + escapeHtml(extraArgs) + '</code></td></tr>';
+      if (avg !== undefined) html += '<tr><td>Moyenne</td><td><b>' + fmt(avg) + ' ' + unit + '</b></td></tr>';
+      if (sum !== undefined) html += '<tr><td>Somme globale</td><td>' + fmt(sum) + ' ' + unit + '</td></tr>';
+      if (min !== undefined) html += '<tr><td>Valeur minimale</td><td>' + fmt(min) + ' ' + unit + '</td></tr>';
+      if (max !== undefined) html += '<tr><td>Valeur maximale</td><td>' + fmt(max) + ' ' + unit + '</td></tr>';
+      if (res.coefficient_of_variation !== undefined) html += '<tr><td>Coef. Variation (CoV)</td><td>' + fmt(res.coefficient_of_variation) + '</td></tr>';
       html += '</tbody></table>';
       html += '</div>';
-    }
-    
-    html += '</div>';
+
+      if (Array.isArray(matrix) && matrix.length > 0) {
+        const numGpus = matrix.length;
+        html += '<div class="nv-heatmap-wrap">';
+        html += '<div class="table-header-flex"><h4>Matrice inter-GPU (' + unit + ')</h4><div class="table-actions" data-html2canvas-ignore="true"><button class="action-btn" onclick="copyTableToImage(this, this.closest(\'.nv-heatmap-wrap\').querySelector(\'table\'))">📸 Image</button><button class="action-btn" onclick="copyTableToExcel(this, this.closest(\'.nv-heatmap-wrap\').querySelector(\'table\'))">📋 Excel</button></div></div>';
+        html += '<table class="nv-heatmap">';
+        html += '<thead><tr><th>De \\ À</th>';
+        for (let j = 0; j < numGpus; j++) {
+          html += '<th>GPU ' + j + '</th>';
+        }
+        html += '</tr></thead><tbody>';
+
+        let maxValInMatrix = 1.0;
+        matrix.forEach(r => { if(Array.isArray(r)) r.forEach(v => { if (v && v > maxValInMatrix) maxValInMatrix = v; })});
+
+        matrix.forEach((row, rIdx) => {
+          html += '<tr><th>GPU ' + rIdx + '</th>';
+          for (let cIdx = 0; cIdx < numGpus; cIdx++) {
+            if (rIdx === cIdx) {
+              html += '<td class="diag">—</td>';
+            } else {
+              const val = Array.isArray(row) ? row[cIdx] : undefined;
+              if (val === undefined || val === null) {
+                html += '<td class="diag">N/A</td>';
+              } else {
+                const pct = Math.min(1.0, Math.max(0.15, val / maxValInMatrix));
+                const colorBase = isLatency ? "34, 211, 238" : "167, 139, 250";
+                const fontColor = pct > 0.6 ? "#ffffff" : "#cbd5e1";
+                html += '<td style="background: rgba(' + colorBase + ', ' + pct + '); color: ' + fontColor + '; box-shadow: 0 0 10px rgba(' + colorBase + ', ' + (pct*0.2) + ');" title="GPU ' + rIdx + ' → GPU ' + cIdx + ' : ' + val + ' ' + unit + '">' + fmt(val) + '</td>';
+              }
+            }
+          }
+          html += '</tr>';
+        });
+        html += '</tbody></table>';
+        html += '</div>';
+      }
+
+      html += '</div>';
+      html += '</div>';
+    });
     html += '</div>';
   });
-  
+
   content.innerHTML = html;
 }
 

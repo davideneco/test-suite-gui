@@ -318,12 +318,18 @@ def bench_gpu_burn(
 
     dur = time.time() - t0
     combined = "".join(lines)
+    cmd_str_burn = (f"CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES={target_gpus} " if target_gpus else "") + shlex.join(cmd)
     metrics = {
         "precision": precision,
+        "time_s": time_s,
         "duration_s": time_s,
-        "command": " ".join(cmd),
+        "command": cmd_str_burn,
         "cwd": metrics_cwd,
     }
+    if target_gpus:
+        metrics["target_gpus"] = target_gpus
+    if extra_args:
+        metrics["extra_args"] = extra_args
     if stopped_by_user:
         metrics["stopped_by_user"] = True
     if segments > 1:
@@ -391,7 +397,7 @@ def bench_gpu_burn(
         cb(100, "Arrêté" if stopped_by_user else "Termine")
     return BenchmarkResult("GPU gpu-burn", "GPU", score, "GFLOPS", dur, combined,
                            metrics=metrics, status=status,
-                           system_info=get_system_info(), notes=notes)
+                           system_info=get_system_info(), notes=notes, command=cmd_str_burn)
 
 
 @with_fault_watch
@@ -560,7 +566,11 @@ def bench_gpu_fryer(
     if stderr_out:
         combined += "\n--- stderr ---\n" + stderr_out
 
-    metrics: dict = {"dtype": dtype, "duration_s": time_s}
+    metrics: dict = {"dtype": dtype, "time_s": time_s, "duration_s": time_s, "command": cmd_str}
+    if target_gpus:
+        metrics["target_gpus"] = target_gpus
+    if extra_args:
+        metrics["extra_args"] = extra_args
 
     # Score : somme des TFLOPS de tous les GPUs (ou premier GPU trouvé)
     score = None
@@ -859,8 +869,12 @@ def bench_gpu_nvbandwidth(
         "command": cmd_str,
         "buffer_size_mb": buffer_size_mb,
         "iterations": iterations,
-        "duration_s": round(dur, 1)
+        "duration_s": round(dur, 1),
     }
+    if target_gpus:
+        metrics["target_gpus"] = target_gpus
+    if extra_args:
+        metrics["extra_args"] = str(extra_args).strip()
 
     score = None
     testcases = []
@@ -1024,6 +1038,9 @@ def bench_gpu_nvbandwidth(
             if min_bw != float('inf'):
                 metrics["bandwidth_min_gb_s"] = round(min_bw, 2)
         metrics["nvbandwidth_data"] = testcases
+        tc_names = [str(tc.get("name", "")).strip() for tc in testcases if tc.get("name")]
+        if tc_names:
+            metrics["nvbandwidth_tests"] = tc_names
 
     # 4. Si toujours rien n'a été trouvé, fallback sur la recherche regex globale simple
     if score is None:

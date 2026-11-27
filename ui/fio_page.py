@@ -18,7 +18,10 @@ from core.fio_profiles import (
     FIO_RW_MODES_ALL, FIO_BS_ALL, FIO_ENGINES_ALL, FIO_DEPTHS_ALL, FIO_JOBS_ALL,
     FIO_ADVANCED_KEYS, FIO_TABS, profile_tab, profile_standard, load_user_profiles,
 )
-from core.fio_runner import run_fio_from_params, run_fio_from_cmd, tool_exists
+from core.fio_runner import (
+    run_fio_from_params, run_fio_from_cmd, tool_exists,
+    _OBSERVATION_KEYS, _SHARED_META_KEYS, _disk_score, _shared_obs, _disk_metrics,
+)
 from core.benchmarks import get_system_info, BenchmarkResult
 from exporters.export import export_all, save_to_history
 from ui.fio_charts import FioResultPanel
@@ -31,39 +34,6 @@ FIO_BS       = FIO_BS_ALL
 FIO_ENGINES  = FIO_ENGINES_ALL
 FIO_DEPTHS   = FIO_DEPTHS_ALL
 FIO_JOBS     = FIO_JOBS_ALL
-
-
-_OBSERVATION_KEYS = ("pcie_links", "inventory_diff", "electrical", "hardware_events", "hardware_monitor")
-
-
-def _disk_score(jm: dict, mode: str) -> float:
-    """Score d'un disque dans un test multi-disques. Un seul sens mesuré (lecture OU écriture) : sa valeur ; profil mixte (rw) : la moyenne ;
-    suite (lecture et écriture mesurées dans des tests DIFFÉRENTS) : le meilleur des deux — jamais leur somme, qui ne correspond à aucune mesure."""
-    r, w = float(jm.get("lecture_MiB_s", 0) or 0), float(jm.get("ecriture_MiB_s", 0) or 0)
-    if r and w:
-        return (r + w) / 2.0 if mode in ("rw", "randrw", "readwrite") else max(r, w)
-    return r or w
-
-
-def _shared_obs(metrics: dict, rd: dict) -> dict:
-    """Relevés de la machine entière d'un test : métriques du résultat + événements matériels (liste) du résultat brut de fio."""
-    out = dict(metrics or {})
-    ev = ((rd or {}).get("hardware_events") or {}).get("events") if isinstance((rd or {}).get("hardware_events"), dict) else None
-    if ev and "hardware_events" not in out:
-        out["hardware_events"] = ev
-    return out
-
-
-def _disk_metrics(jm: dict, shared: dict, first: bool) -> dict:
-    """Métriques propres à un disque (sans le nom interne « job0 ») ; les relevés de la machine entière (liens PCIe, inventaire, électronique,
-    événements matériels) ne sont attachés qu'au PREMIER disque pour ne pas être comptés plusieurs fois."""
-    out = {k: v for k, v in dict(jm).items() if k != "name"}
-    if first:
-        out.update({k: shared[k] for k in _OBSERVATION_KEYS if k in shared})
-    elif any(k in shared for k in _OBSERVATION_KEYS):
-        # Les autres disques n'ont ni section « Liens PCIe » ni relevé électronique : sans cette mention, on croirait qu'ils manquent
-        out["observations_groupe"] = "relevés de la machine (liens PCIe, inventaire, électronique) partagés avec le 1er disque du test"
-    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -894,6 +864,12 @@ class FioPage(Gtk.Box):
 
         # Sauvegarder le BenchmarkResult complet
         if rd.get("status") == "ok":
+            for pk, pv in (profile.get("params") or {}).items():
+                if pk in _SHARED_META_KEYS and pv not in ("", None) and pk not in m:
+                    m[pk] = pv
+            if profile.get("name") and "profile_name" not in m:
+                m["profile_name"] = profile["name"]
+            cmd_fio = str(m.get("command", "") or "")
             disk_info = {}
             idxs = self._get_selected_disk_indices()
             if idxs:
@@ -907,6 +883,7 @@ class FioPage(Gtk.Box):
                 duration_s=rd.get("duration_s", 0),
                 raw_output=rd.get("raw", "")[:4000],
                 metrics=m, status="ok",
+                command=cmd_fio,
                 system_info={
                     **get_system_info(),
                     "disk_model":  disk_info.get("model",""),
@@ -941,6 +918,7 @@ class FioPage(Gtk.Box):
                         duration_s=rd.get("duration_s", 0),
                         raw_output="",
                         metrics=indiv_metrics, status="ok",
+                        command=str(indiv_metrics.get("command", "") or cmd_fio),
                         system_info={
                             **get_system_info(),
                             "disk_model":  d_indiv.get("model",""),
@@ -1690,6 +1668,10 @@ class FioPage(Gtk.Box):
                 self.charts_panel.set_result(rd, disk_info, test_params)
 
         met = dict(rd.get("metrics", {}))
+        for pk, pv in (test_params or {}).items():
+            if pk in _SHARED_META_KEYS and pv not in ("", None) and pk not in met:
+                met[pk] = pv
+        cmd_fio = str(met.get("command", "") or "")
         if (rd.get("hardware_events") or {}).get("events"):
             met["hardware_events"] = rd["hardware_events"]["events"]   # surveillance matérielle en direct
         if "series" in rd and "series" not in met:
@@ -1716,6 +1698,7 @@ class FioPage(Gtk.Box):
                     duration_s=rd.get("duration_s", 0),
                     raw_output=rd.get("raw", "")[:8000],
                     metrics=indiv_metrics, status="ok",
+                    command=str(indiv_metrics.get("command", "") or cmd_fio),
                     system_info={
                         **get_system_info(),
                         "disk_model":  d_indiv.get("model",""),
@@ -1740,6 +1723,7 @@ class FioPage(Gtk.Box):
                 raw_output=rd.get("raw", "")[:8000],
                 metrics=met,
                 status="ok",
+                command=cmd_fio,
                 system_info={
                     **get_system_info(),
                     "disk_model":  disk_info.get("model", ""),
