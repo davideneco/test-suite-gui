@@ -191,7 +191,12 @@ class SequencePage(Gtk.Box):
         self._html_path = ""
         self._cur_i, self._cur_n = 0, 1
         self._gpu_checks = []
+        self._disk_checks = []
         self._disks = []
+        self._gpu_tools = None
+        self._active_profile_id = None
+        self._suite_slug = "sequence"
+        self._profile_btns = {}
         self._rec = cp.SequenceRecorder()
         self._timer = 0
         self._stop_requested = False
@@ -208,8 +213,8 @@ class SequencePage(Gtk.Box):
         title.set_halign(Gtk.Align.START)
         self.append(title)
         sub = Gtk.Label()
-        sub.set_markup('<span foreground="#6c7086" size="small">Compose une séquence de tests. Un bloc « En même temps » lance ses tests '
-                       'en parallèle (ex. burn CPU + gpu-fryer + profil SSD). Les blocs s’exécutent dans l’ordre.</span>')
+        sub.set_markup('<span foreground="#6c7086" size="small">Choisissez un profil prêt à l’emploi ou composez votre séquence par blocs. '
+                       'Priorité chauffe, stabilité et détection d’erreurs (parallèle par défaut, bascule séquentielle en 1 clic).</span>')
         sub.set_halign(Gtk.Align.START); sub.set_wrap(True)
         self.append(sub)
 
@@ -235,19 +240,83 @@ class SequencePage(Gtk.Box):
         bar.append(self._btn_open); bar.append(self._btn_html)
         self.append(bar)
 
-        # Options (grille à 2 colonnes)
+        # Encart Profils rapides (CPU+RAM+GPU+SSD, CPU+RAM+GPU, CPU+RAM+SSD) + palier + mode + option perf
+        prof_frame = Gtk.Frame()
+        prof_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        for m in ("top", "bottom", "start", "end"):
+            getattr(prof_box, f"set_margin_{m}")(10)
+
+        p_row = Gtk.Box(spacing=8)
+        p_lbl = Gtk.Label(); p_lbl.set_markup('<b>Profils rapides :</b>')
+        p_lbl.set_halign(Gtk.Align.START)
+        p_row.append(p_lbl)
+        for prof in cp.SEQUENCE_PROFILES:
+            btn = Gtk.ToggleButton(label=f"{prof['icon']} {prof['name']}")
+            btn.set_tooltip_text(prof["desc"])
+            btn.connect("toggled", self._on_profile_toggled, prof["id"])
+            self._profile_btns[prof["id"]] = btn
+            p_row.append(btn)
+        prof_box.append(p_row)
+
+        opts_row = Gtk.Box(spacing=12)
+        opts_row.append(self._label("Palier :"))
+        self._tier_ids = [t["id"] for t in cp.DURATION_TIERS]
+        self._tier_dd = Gtk.DropDown(model=Gtk.StringList.new([t["label"] for t in cp.DURATION_TIERS]))
+        self._tier_dd.set_selected(1)   # Standard (30 min) par défaut
+        self._tier_dd.connect("notify::selected", lambda *_: self._refresh_active_profile())
+        opts_row.append(self._tier_dd)
+
+        opts_row.append(self._label("Exécution :"))
+        self._exec_mode_dd = Gtk.DropDown(model=Gtk.StringList.new([
+            "Parallèle (chauffe max simultanée)",
+            "Séquentiel (étape par étape)",
+        ]))
+        self._exec_mode_dd.set_selected(0)   # Parallèle par défaut
+        self._exec_mode_dd.connect("notify::selected", lambda *_: self._refresh_active_profile())
+        opts_row.append(self._exec_mode_dd)
+
+        self._perf_chk = Gtk.CheckButton(label="Contrôle perf. en fin (STREAM / nvbandwidth / FIO Peak)")
+        self._perf_chk.set_active(False)
+        self._perf_chk.set_tooltip_text("Optionnel (décoché par défaut) : ajoute en fin de séquence un contrôle rapide de bande passante et débit.")
+        self._perf_chk.connect("toggled", lambda *_: self._refresh_active_profile())
+        opts_row.append(self._perf_chk)
+        prof_box.append(opts_row)
+
+        self._gpu_backend_lbl = Gtk.Label()
+        self._gpu_backend_lbl.set_halign(Gtk.Align.START); self._gpu_backend_lbl.set_wrap(True)
+        self._gpu_backend_lbl.set_markup('<span foreground="#6c7086" size="small">Détection des disques et des outils GPU…</span>')
+        prof_box.append(self._gpu_backend_lbl)
+        prof_frame.set_child(prof_box)
+        self.append(prof_frame)
+
+        # Options matérielles (grille à 2 colonnes : multi-disques + multi-GPU + pause + arrêt panne)
         grid = Gtk.Grid(column_spacing=14, row_spacing=6)
         lbl = lambda t: self._label(t)
-        grid.attach(lbl("Disque de test (fio) :"), 0, 0, 1, 1)
-        self._disk_dd = Gtk.DropDown(model=Gtk.StringList.new(["Détection des disques…"]))
-        self._disk_dd.set_hexpand(True)
-        grid.attach(self._disk_dd, 1, 0, 1, 1)
+        disk_head = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        disk_head.append(lbl("Disques de test (fio) :"))
+        self._disk_all_btn = Gtk.Button(label="Tout cocher")
+        self._disk_all_btn.add_css_class("flat")
+        self._disk_all_btn.set_halign(Gtk.Align.END)
+        self._disk_all_btn.set_visible(False)
+        self._disk_all_btn.connect("clicked", self._on_toggle_all_disks)
+        disk_head.append(self._disk_all_btn)
+        grid.attach(disk_head, 0, 0, 1, 1)
+
+        self._disk_box = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=3, column_spacing=8, row_spacing=2)
+        self._disk_box.append(Gtk.Label(label="détection…"))
+        disk_sc = Gtk.ScrolledWindow()
+        disk_sc.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        disk_sc.set_max_content_height(72); disk_sc.set_propagate_natural_height(True)
+        disk_sc.set_hexpand(True); disk_sc.set_child(self._disk_box)
+        grid.attach(disk_sc, 1, 0, 1, 1)
+
         grid.attach(lbl("GPU à tester :"), 2, 0, 1, 1)
-        self._gpu_box = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=4, column_spacing=8)
+        self._gpu_box = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=3, column_spacing=8, row_spacing=2)
         self._gpu_box.append(Gtk.Label(label="détection…"))
         grid.attach(self._gpu_box, 3, 0, 1, 1)
+
         grid.attach(lbl("Pause entre blocs (s) :"), 0, 1, 1, 1)
-        self._cool = Gtk.SpinButton.new_with_range(0, 3600, 10); self._cool.set_value(30)
+        self._cool = Gtk.SpinButton.new_with_range(0, 3600, 10); self._cool.set_value(60)
         self._cool.set_halign(Gtk.Align.START)
         grid.attach(self._cool, 1, 1, 1, 1)
         self._stop_fault = Gtk.CheckButton(label="Arrêter si panne matérielle critique")
@@ -259,7 +328,7 @@ class SequencePage(Gtk.Box):
         self._nb = Gtk.Notebook(); self._nb.set_vexpand(True)
         build_tab = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self._builder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        sc = Gtk.ScrolledWindow(); sc.set_vexpand(True); sc.set_min_content_height(280)
+        sc = Gtk.ScrolledWindow(); sc.set_vexpand(True); sc.set_min_content_height(240)
         sc.set_child(self._builder)
         build_tab.append(sc)
         self._summary = Gtk.Label(); self._summary.set_halign(Gtk.Align.START); self._summary.set_wrap(True)
@@ -291,6 +360,53 @@ class SequencePage(Gtk.Box):
         l = Gtk.Label(label=text); l.add_css_class("param-label"); l.set_halign(Gtk.Align.END)
         return l
 
+    # ── Profils rapides ─────────────────────────────────────────────────────
+    def _current_tier(self) -> str:
+        i = self._tier_dd.get_selected()
+        return self._tier_ids[i] if 0 <= i < len(self._tier_ids) else "standard"
+
+    def _current_exec_mode(self) -> str:
+        return MODE_SEQ if self._exec_mode_dd.get_selected() == 1 else MODE_PAR
+
+    def _on_profile_toggled(self, btn, profile_id: str):
+        if not btn.get_active():
+            if self._active_profile_id == profile_id:
+                self._active_profile_id = None
+            return
+        for pid, other in self._profile_btns.items():
+            if pid != profile_id and other.get_active():
+                other.set_active(False)
+        self._active_profile_id = profile_id
+        self._apply_active_profile()
+
+    def _refresh_active_profile(self):
+        if self._active_profile_id:
+            self._apply_active_profile()
+
+    def _apply_active_profile(self):
+        if not self._active_profile_id or self._running:
+            return
+        spec = cp.build_profile_blocks(
+            self._active_profile_id,
+            tier=self._current_tier(),
+            mode=self._current_exec_mode(),
+            include_perf=self._perf_chk.get_active(),
+            gpu_tools=self._gpu_tools,
+        )
+        self.blocks = spec["blocks"]
+        self._suite_slug = spec["slug"]
+        self._cool.set_value(float(spec.get("cooldown_s", 60)))
+        if spec.get("gpu_label"):
+            self._gpu_backend_lbl.set_markup(
+                f'<span foreground="#a0a0a0" size="small">Profil actif : <b>{GLib.markup_escape_text(spec["name"])}</b>'
+                f' · Outil GPU auto : <tt>{GLib.markup_escape_text(spec["gpu_label"])}</tt></span>'
+            )
+        else:
+            self._gpu_backend_lbl.set_markup(
+                f'<span foreground="#a0a0a0" size="small">Profil actif : <b>{GLib.markup_escape_text(spec["name"])}</b></span>'
+            )
+        self._render()
+
     # ── Détection matériel (thread) ─────────────────────────────────────────
     def _detect_hardware(self):
         disks, gpus = [], []
@@ -299,6 +415,7 @@ class SequencePage(Gtk.Box):
             disks = get_mounted_disks(max_age_s=15)
         except Exception:
             pass
+        has_nvidia = False
         try:
             if nvidia_smi_usable():
                 out = subprocess.run(["nvidia-smi", "--query-gpu=index,name", "--format=csv,noheader"],
@@ -306,39 +423,111 @@ class SequencePage(Gtk.Box):
                 for line in out.splitlines():
                     idx, _, name = line.partition(",")
                     if idx.strip().isdigit():
-                        gpus.append((idx.strip(), f"GPU {idx.strip()} — {name.strip()}"))
+                        has_nvidia = True
+                        gpus.append((idx.strip(), f"GPU {idx.strip()} — {name.strip()}", "nvidia"))
         except Exception:
             pass
-        GLib.idle_add(self._apply_hardware, disks, gpus)
+        if not gpus:
+            # Détection best-effort des GPU Intel / AMD pour l'affichage et le choix de profil
+            try:
+                from core.intel_gpu import detect_intel_gpus
+                for i, ig in enumerate(detect_intel_gpus() or []):
+                    nm = ig.get("nom") or ig.get("modele") or f"Intel GPU {i}"
+                    gpus.append((str(i), f"GPU {i} — {nm} (Intel)", "intel"))
+            except Exception:
+                pass
+        if not gpus:
+            try:
+                out = subprocess.run(["lspci", "-nn"], capture_output=True, text=True, timeout=5).stdout
+                idx_other = 0
+                for line in out.splitlines():
+                    low = line.lower()
+                    if any(k in low for k in ("vga compatible", "3d controller", "display controller")):
+                        if any(bmc in low for bmc in ("aspeed", "matrox", "cirrus", "bochs")):
+                            continue
+                        desc = line.split(":", 2)[-1].strip()
+                        gpus.append((str(idx_other), f"GPU {idx_other} — {desc[:48]}", "other"))
+                        idx_other += 1
+            except Exception:
+                pass
+        gpu_tools = cp.select_gpu_tools(has_nvidia=has_nvidia)
+        GLib.idle_add(self._apply_hardware, disks, gpus, gpu_tools)
 
-    def _apply_hardware(self, disks, gpus):
-        # Disques de données uniquement : ni zram/loop/0 o, dossiers montés d'abord (jamais un disque brut par défaut)
+    def _apply_hardware(self, disks, gpus, gpu_tools):
+        # Disques de données uniquement : ni zram/loop/0 o, dossiers montés d'abord (jamais un disque OS pré-coché)
         disks = [d for d in disks if not any(x in (d.get("dev") or d.get("path") or "") for x in ("zram", "/dev/ram", "/dev/loop"))
                  and not str(d.get("size", "")).startswith("0B")]
         disks.sort(key=lambda d: not d.get("mounted", False))
+        has_real_disk = bool(disks)
         if not disks:
-            disks = [{"path": "/tmp", "label": "/tmp (aucun disque de données détecté — attention : disque système)", "mounted": True}]
+            disks = [{"path": "/tmp", "label": "/tmp (aucun disque de données détecté — attention : disque système)", "mounted": True, "is_fallback": True}]
         self._disks = disks
-        labels = [d.get("label", d.get("path", "?")) for d in disks]
-        self._disk_dd.set_model(Gtk.StringList.new(labels))
+        self._gpu_tools = gpu_tools
+
+        child = self._disk_box.get_first_child()
+        while child:
+            nxt = child.get_next_sibling(); self._disk_box.remove(child); child = nxt
+        self._disk_checks = []
+        for i, d in enumerate(disks):
+            lbl_txt = d.get("label", d.get("path", "?"))
+            chk = Gtk.CheckButton(label=lbl_txt)
+            chk._disk_path = d.get("path", "")
+            chk.set_tooltip_text(d.get("path", ""))
+            # Pré-cocher le 1er vrai disque de données détecté (jamais le repli /tmp)
+            if has_real_disk and i == 0:
+                chk.set_active(True)
+            chk.connect("toggled", lambda *_: self._update_summary())
+            self._disk_checks.append(chk)
+            self._disk_box.append(chk)
+        self._disk_all_btn.set_visible(len(self._disk_checks) >= 2)
+
         child = self._gpu_box.get_first_child()
         while child:
             nxt = child.get_next_sibling(); self._gpu_box.remove(child); child = nxt
         self._gpu_checks = []
         if not gpus:
-            self._gpu_box.append(Gtk.Label(label="aucun GPU NVIDIA détecté"))
-        for idx, label in gpus:
-            chk = Gtk.CheckButton(label=label)
-            chk._gpu_index = idx
-            self._gpu_checks.append(chk)
-            self._gpu_box.append(chk)
+            self._gpu_box.append(Gtk.Label(label="aucun GPU dédié détecté"))
+        for idx, label, vendor in gpus:
+            if vendor == "nvidia":
+                chk = Gtk.CheckButton(label=label)
+                chk._gpu_index = idx
+                chk.connect("toggled", lambda *_: self._update_summary())
+                self._gpu_checks.append(chk)
+                self._gpu_box.append(chk)
+            else:
+                info_lbl = Gtk.Label(label=f"• {label}")
+                info_lbl.set_halign(Gtk.Align.START)
+                self._gpu_box.append(info_lbl)
+
+        # Si aucun test n'est encore dans la séquence, pré-sélectionner le profil le plus adapté au matériel détecté
+        if not any(b.get("items") for b in self.blocks) and not self._active_profile_id:
+            if gpus and has_real_disk:
+                default_pid = "cpu_ram_gpu_ssd"
+            elif gpus:
+                default_pid = "cpu_ram_gpu"
+            else:
+                default_pid = "cpu_ram_ssd"
+            if default_pid in self._profile_btns:
+                self._profile_btns[default_pid].set_active(True)
+        elif self._active_profile_id:
+            self._apply_active_profile()
+        else:
+            self._gpu_backend_lbl.set_markup(
+                f'<span foreground="#6c7086" size="small">Outil GPU auto : <tt>{GLib.markup_escape_text(gpu_tools.get("label", ""))}</tt></span>'
+            )
         return False
 
+    def _on_toggle_all_disks(self, *_):
+        if not self._disk_checks:
+            return
+        all_checked = all(c.get_active() for c in self._disk_checks)
+        for c in self._disk_checks:
+            c.set_active(not all_checked)
+        self._disk_all_btn.set_label("Tout cocher" if all_checked else "Tout décocher")
+
     def _fio_path(self) -> str:
-        i = self._disk_dd.get_selected()
-        if self._disks and 0 <= i < len(self._disks):
-            return self._disks[i].get("path", "")
-        return ""
+        selected = [c._disk_path for c in self._disk_checks if c.get_active() and getattr(c, "_disk_path", "")]
+        return ",".join(selected)
 
     def _target_gpus(self) -> str:
         return ",".join(c._gpu_index for c in self._gpu_checks if c.get_active())
@@ -486,6 +675,11 @@ class SequencePage(Gtk.Box):
     def _on_clear(self, *_):
         if self._running:
             return
+        self._active_profile_id = None
+        self._suite_slug = "sequence"
+        for b in self._profile_btns.values():
+            if b.get_active():
+                b.set_active(False)
         self.blocks = [{"mode": MODE_SEQ, "items": []}]
         self._render()
 
@@ -497,11 +691,18 @@ class SequencePage(Gtk.Box):
             txt += f" — durée estimée ≈ {cp.format_duration(est['seconds'])}"
             if est["unknown"]:
                 txt += f" (+ {est['unknown']} test(s) de durée variable)"
+        fio_path = self._fio_path()
+        if fio_path:
+            n_d = len([p for p in fio_path.split(",") if p.strip()])
+            txt += f" · {n_d} disque(s) FIO sélectionné(s)"
         d = cp.describe_blocks(self.blocks)
         self._summary.set_markup(f'<span foreground="#a0a0a0" size="small">{GLib.markup_escape_text(txt)}'
                                  + (f'\n{GLib.markup_escape_text(d)}' if d else "") + '</span>')
         warns = []
-        steps = cp.blocks_to_steps(self.blocks, self._fio_path(), self._target_gpus())
+        steps = cp.blocks_to_steps(self.blocks, fio_path, self._target_gpus())
+        flat = [s for st in steps for s in (st.get("parallel") or [st])]
+        if any("fio" in s for s in flat) and not fio_path:
+            warns.append("Aucun disque de test (fio) coché : sélectionnez au moins un disque de données ci-dessus, ou choisissez le profil CPU + RAM + GPU.")
         for st in steps:
             if "parallel" in st:
                 warns += parallel_conflicts(st)
@@ -536,8 +737,16 @@ class SequencePage(Gtk.Box):
         except Exception as exc:
             self._log_line(f"✗ Modèle illisible : {exc}")
             return
+        self._active_profile_id = None
+        for b in self._profile_btns.values():
+            if b.get_active():
+                b.set_active(False)
+        self._suite_slug = sid or "sequence"
         self.blocks = cp.steps_to_blocks(suite.get("steps", [])) or [{"mode": MODE_SEQ, "items": []}]
         self._cool.set_value(float(suite.get("cooldown_s", 30) or 0))
+        self._gpu_backend_lbl.set_markup(
+            f'<span foreground="#a0a0a0" size="small">Modèle chargé : <b>{GLib.markup_escape_text(suite.get("name", sid))}</b></span>'
+        )
         self._render()
         self._log_line(f"Modèle chargé : {suite.get('name', sid)}")
 
@@ -570,9 +779,14 @@ class SequencePage(Gtk.Box):
     def _on_run(self, *_):
         if self._running:
             return
-        steps = cp.blocks_to_steps(self.blocks, self._fio_path(), self._target_gpus())
+        fio_path = self._fio_path()
+        steps = cp.blocks_to_steps(self.blocks, fio_path, self._target_gpus())
         errs = validate_steps(steps)
+        flat = [s for st in steps for s in (st.get("parallel") or [st])]
+        if any("fio" in s for s in flat) and not fio_path:
+            errs.append("Aucun disque de test (fio) sélectionné : cochez au moins un disque de données (ou utilisez le profil CPU + RAM + GPU).")
         if errs:
+            self._nb.set_current_page(1)
             self._log_line("✗ Séquence invalide :\n  - " + "\n  - ".join(errs))
             return
         self._running = True
@@ -591,8 +805,12 @@ class SequencePage(Gtk.Box):
             sysinfo = self.win.system_info_snapshot()
         except Exception:
             pass
-        params = {"fio_path": self._fio_path(), "cooldown": float(self._cool.get_value()),
-                  "stop_on_fault": self._stop_fault.get_active()}
+        params = {
+            "fio_path": fio_path,
+            "cooldown": float(self._cool.get_value()),
+            "stop_on_fault": self._stop_fault.get_active(),
+            "suite_slug": self._suite_slug or "sequence",
+        }
         threading.Thread(target=self._worker, args=(steps, sysinfo, params), daemon=True).start()
 
     def _on_stop(self, *_):
@@ -624,17 +842,19 @@ class SequencePage(Gtk.Box):
         except Exception:
             pass
         meta.setdefault("system_name", meta.get("model") or "machine")
-        run_dir = cp.make_run_dir(OUTPUT_DIR, meta, "sequence")
+        suite_slug = params.get("suite_slug") or "sequence"
+        run_dir = cp.make_run_dir(OUTPUT_DIR, meta, suite_slug)
         os.makedirs(run_dir, exist_ok=True)
         self._run_dir = run_dir
-        self._ui(self._log_line, f"Séquence : {cp.describe_blocks(self.blocks)}\nDossier : {run_dir}")
+        self._ui(self._log_line, f"Séquence ({suite_slug}) : {cp.describe_blocks(self.blocks)}\nDossier : {run_dir}")
         for st in steps:
             for w in (parallel_conflicts(st) if "parallel" in st else []):
                 self._ui(self._log_line, f"⚠ {w}")
         try:
             flat = [s for st in steps for s in (st.get("parallel") or [st])]
             need_fio = any("fio" in s for s in flat)
-            items = preflight.run_preflight(out_dir=OUTPUT_DIR, target_paths=[params["fio_path"]] if (need_fio and params["fio_path"]) else [],
+            fio_targets = [p.strip() for p in str(params.get("fio_path") or "").split(",") if p.strip()]
+            items = preflight.run_preflight(out_dir=OUTPUT_DIR, target_paths=fio_targets if (need_fio and fio_targets) else [],
                                             target_need_mb=2048 if need_fio else 0,
                                             gpus=any(str(s.get("bench", "")).startswith("gpu") for s in flat))
             if items:
@@ -677,7 +897,7 @@ class SequencePage(Gtk.Box):
             self._ui(self._push_result, res)
 
         runner = CampaignRunner(steps, run_dir, meta, {"fio_path": params["fio_path"]} if params["fio_path"] else {},
-                                cooldown_s=params["cooldown"], stop_on_critical=params["stop_on_fault"], suite_name="sequence",
+                                cooldown_s=params["cooldown"], stop_on_critical=params["stop_on_fault"], suite_name=suite_slug,
                                 on_step_start=on_start, on_step_done=on_done, on_progress=on_progress, on_series=rec.push)
         self._runner = runner
         if self._stop_requested:             # Stopper cliqué pendant la création : le moteur s'arrête à la première étape

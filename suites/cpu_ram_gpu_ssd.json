@@ -1,0 +1,17 @@
+{
+  "name": "Profil — CPU + RAM + GPU + SSD (chauffe & stabilité)",
+  "description": "Validation complète de toute la machine (30 min en parallèle + intégrité VRAM et CRC SSD). Compatible toutes marques GPU (OpenCL) en CLI ; l'interface graphique sélectionne automatiquement gpu-fryer / gpu-burn sur NVIDIA si installés. Renseigner --fio-path (un ou plusieurs disques de DONNÉES séparés par virgule).",
+  "cooldown_s": 60,
+  "steps": [
+    {
+      "parallel": [
+        {"stress": "mix_30m", "time_s": 1800},
+        {"bench": "gpu_oclburn", "time_s": 1800, "params": {"mode": "power"}},
+        {"fio": "heat_rand_mixed_1h", "time_s": 1800}
+      ]
+    },
+    {"pause": 60},
+    {"bench": "gpu_oclburn", "time_s": 300, "params": {"mode": "memory", "vram_pct": 90}},
+    {"fio": "stab_verify_crc_30m", "time_s": 600}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "Profil — CPU + RAM + SSD (chauffe & stabilité)",
+  "description": "Validation serveur calcul et stockage sans GPU (30 min en parallèle + contrôle d'intégrité CRC SSD). Renseigner --fio-path (un ou plusieurs disques de DONNÉES séparés par virgule).",
+  "cooldown_s": 60,
+  "steps": [
+    {
+      "parallel": [
+        {"stress": "mix_30m", "time_s": 1800},
+        {"fio": "heat_rand_mixed_1h", "time_s": 1800}
+      ]
+    },
+    {"pause": 60},
+    {"fio": "stab_verify_crc_30m", "time_s": 600}
+  ]
+}

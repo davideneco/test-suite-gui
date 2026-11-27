@@ -1,0 +1,15 @@
+{
+  "name": "Profil — CPU + RAM + GPU (chauffe & stabilité)",
+  "description": "Validation calcul et GPU sans écriture sur disque (30 min en parallèle + intégrité VRAM). Compatible toutes marques GPU (OpenCL) en CLI ; l'interface graphique sélectionne automatiquement gpu-fryer / gpu-burn sur NVIDIA si installés.",
+  "cooldown_s": 60,
+  "steps": [
+    {
+      "parallel": [
+        {"stress": "mix_30m", "time_s": 1800},
+        {"bench": "gpu_oclburn", "time_s": 1800, "params": {"mode": "power"}}
+      ]
+    },
+    {"pause": 60},
+    {"bench": "gpu_oclburn", "time_s": 300, "params": {"mode": "memory", "vram_pct": 90}}
+  ]
+}

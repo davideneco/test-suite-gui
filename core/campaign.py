@@ -200,6 +200,232 @@ def is_user_suite(path: str) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Profils prêts à l'emploi (CPU + RAM + GPU + SSD, CPU + RAM + GPU, CPU + RAM + SSD)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SEQUENCE_PROFILES = (
+    {
+        "id": "cpu_ram_gpu_ssd",
+        "name": "CPU + RAM + GPU + SSD",
+        "icon": "🔥",
+        "desc": "Validation complète de la machine : chauffe, stabilité et détection d'erreurs sur tous les composants.",
+        "components": ("cpu_ram", "gpu", "ssd"),
+    },
+    {
+        "id": "cpu_ram_gpu",
+        "name": "CPU + RAM + GPU",
+        "icon": "🎮",
+        "desc": "Validation calcul et GPU (chauffe, stabilité, intégrité VRAM) sans écriture sur disque de données.",
+        "components": ("cpu_ram", "gpu"),
+    },
+    {
+        "id": "cpu_ram_ssd",
+        "name": "CPU + RAM + SSD",
+        "icon": "💾",
+        "desc": "Validation serveur calcul et stockage (chauffe CPU/RAM + chauffe et intégrité CRC SSD, sans GPU).",
+        "components": ("cpu_ram", "ssd"),
+    },
+)
+
+DURATION_TIERS = (
+    {
+        "id": "quick",
+        "label": "Rapide (10 min)",
+        "burn_s": 600,
+        "vram_s": 180,
+        "crc_s": 300,
+        "stress_id": "mix_5m",
+        "cooldown_s": 30,
+    },
+    {
+        "id": "standard",
+        "label": "Standard (30 min)",
+        "burn_s": 1800,
+        "vram_s": 300,
+        "crc_s": 600,
+        "stress_id": "mix_30m",
+        "cooldown_s": 60,
+    },
+    {
+        "id": "burnin",
+        "label": "Burn-in (2 h)",
+        "burn_s": 7200,
+        "vram_s": 600,
+        "crc_s": 1800,
+        "stress_id": "mix_4h",
+        "cooldown_s": 60,
+    },
+)
+
+
+def get_sequence_profile(profile_id: str) -> Optional[Dict]:
+    """Retourne la définition d'un profil de séquence prêt à l'emploi (None si inconnu)."""
+    return next((p for p in SEQUENCE_PROFILES if p["id"] == profile_id), None)
+
+
+def get_duration_tier(tier_id: str) -> Dict:
+    """Retourne le palier de durée demandé (repli sur « standard » si inconnu)."""
+    return next((t for t in DURATION_TIERS if t["id"] == tier_id), DURATION_TIERS[1])
+
+
+def select_gpu_tools(tool_check=None, has_nvidia: Optional[bool] = None) -> Dict:
+    """Choisit automatiquement les outils GPU adaptés à la machine (repli universel NVIDIA → OpenCL → Vulkan/clpeak).
+
+    Retourne {'stress': dict, 'vram': dict|None, 'perf': dict|None, 'label': str}.
+    Priorité : chauffe et vérification d'erreurs avant toute mesure de performance.
+    """
+    if tool_check is None:
+        from core.bench_utils import tool_exists
+        tool_check = tool_exists
+    if has_nvidia is None:
+        try:
+            from core.safety import nvidia_smi_usable
+            has_nvidia = nvidia_smi_usable()
+        except Exception:
+            has_nvidia = False
+
+    has_fryer = bool(tool_check("gpu-fryer") or tool_check("gpu_fryer"))
+    has_burn = bool(tool_check("gpu-burn") or tool_check("gpu_burn"))
+    has_nvbw = bool(tool_check("nvbandwidth"))
+    has_clpeak = bool(tool_check("clpeak"))
+    has_vkpeak = bool(tool_check("vkpeak"))
+    # oclburn est compilé automatiquement via gcc + en-têtes OpenCL (ou binaire existant)
+    has_ocl = bool(tool_check("oclburn") or tool_check("gcc") or tool_check("clinfo"))
+
+    if has_nvidia and (has_fryer or has_burn):
+        stress_id = "gpu_fryer" if has_fryer else "gpu_burn"
+        vram_item = {"kind": "bench", "id": "gpu_vram_test"} if has_burn else (
+            {"kind": "bench", "id": "gpu_oclburn", "params": {"mode": "memory", "vram_pct": 90}} if has_ocl else None
+        )
+        perf_item = {"kind": "bench", "id": "gpu_nvbandwidth"} if has_nvbw else (
+            {"kind": "bench", "id": "gpu_vram_bw"} if has_clpeak else None
+        )
+        stress_name = "gpu-fryer" if has_fryer else "gpu-burn"
+        vram_name = " + VRAM" if vram_item else ""
+        return {
+            "stress": {"kind": "bench", "id": stress_id},
+            "vram": vram_item,
+            "perf": perf_item,
+            "label": f"NVIDIA ({stress_name}{vram_name})",
+        }
+
+    if has_ocl:
+        perf_item = (
+            {"kind": "bench", "id": "gpu_vram_bw", "params": {"method": "clpeak"}} if has_clpeak
+            else ({"kind": "bench", "id": "gpu_vkpeak"} if has_vkpeak else None)
+        )
+        return {
+            "stress": {"kind": "bench", "id": "gpu_oclburn", "params": {"mode": "power"}},
+            "vram": {"kind": "bench", "id": "gpu_oclburn", "params": {"mode": "memory", "vram_pct": 90}},
+            "perf": perf_item,
+            "label": "OpenCL toutes marques (oclburn puissance + VRAM)",
+        }
+
+    if has_vkpeak or has_clpeak:
+        stress_id = "gpu_vkpeak" if has_vkpeak else "gpu_clpeak"
+        perf_item = {"kind": "bench", "id": "gpu_clpeak"} if has_clpeak else {"kind": "bench", "id": "gpu_vkpeak"}
+        return {
+            "stress": {"kind": "bench", "id": stress_id},
+            "vram": None,
+            "perf": perf_item,
+            "label": f"Repli universel ({'vkpeak' if has_vkpeak else 'clpeak'})",
+        }
+
+    # Dernier repli déclaratif (oclburn reste universel toutes marques si installé ensuite)
+    return {
+        "stress": {"kind": "bench", "id": "gpu_oclburn", "params": {"mode": "power"}},
+        "vram": {"kind": "bench", "id": "gpu_oclburn", "params": {"mode": "memory", "vram_pct": 90}},
+        "perf": {"kind": "bench", "id": "gpu_vram_bw"},
+        "label": "OpenCL par défaut (oclburn)",
+    }
+
+
+def build_profile_blocks(
+    profile_id: str,
+    tier: str = "standard",
+    mode: str = "par",
+    include_perf: bool = False,
+    gpu_tools: Optional[Dict] = None,
+) -> Dict:
+    """Construit les blocs d'une séquence pour l'un des profils (CPU+RAM+GPU+SSD, CPU+RAM+GPU, CPU+RAM+SSD).
+
+    - Priorité chauffe / stabilité / erreurs en tête.
+    - `mode='par'` (défaut) : chauffe simultanée de tous les composants du profil puis contrôles d'intégrité (VRAM / CRC).
+    - `mode='seq'` : enchaînement composant par composant (CPU+RAM → GPU → SSD) avec pauses de refroidissement.
+    - `include_perf=True` : ajoute en fin de séquence un bloc optionnel de contrôle de performance (STREAM / nvbandwidth / FIO Peak).
+    """
+    prof = get_sequence_profile(profile_id)
+    if not prof:
+        raise ValueError(f"Profil de séquence inconnu : {profile_id}")
+    tcfg = get_duration_tier(tier)
+    comps = prof["components"]
+    has_gpu = "gpu" in comps
+    has_ssd = "ssd" in comps
+    burn_s = int(tcfg["burn_s"])
+    vram_s = int(tcfg["vram_s"])
+    crc_s = int(tcfg["crc_s"])
+    cool_s = int(tcfg["cooldown_s"])
+    gtools = gpu_tools if gpu_tools is not None else (select_gpu_tools() if has_gpu else {})
+
+    def _with_time(item_tpl: Dict, dur_s: int) -> Dict:
+        out = {"kind": item_tpl["kind"], "id": item_tpl["id"], "time_s": dur_s}
+        if item_tpl.get("params"):
+            out["params"] = dict(item_tpl["params"])
+        return out
+
+    blocks: List[Dict] = []
+    if mode == "par":
+        par_items = [{"kind": "stress", "id": tcfg["stress_id"], "time_s": burn_s}]
+        if has_gpu and gtools.get("stress"):
+            par_items.append(_with_time(gtools["stress"], burn_s))
+        if has_ssd:
+            par_items.append({"kind": "fio", "id": "heat_rand_mixed_1h", "time_s": burn_s})
+        blocks.append({"mode": "par", "items": par_items})
+
+        check_items: List[Dict] = []
+        if has_gpu and gtools.get("vram"):
+            check_items.append(_with_time(gtools["vram"], vram_s))
+        if has_ssd:
+            check_items.append({"kind": "fio", "id": "stab_verify_crc_30m", "time_s": crc_s})
+        if check_items:
+            blocks.append({"mode": "seq", "items": [{"kind": "pause", "id": "", "time_s": cool_s}] + check_items})
+    else:
+        seq_items: List[Dict] = [{"kind": "stress", "id": tcfg["stress_id"], "time_s": burn_s}]
+        if has_gpu:
+            seq_items.append({"kind": "pause", "id": "", "time_s": cool_s})
+            if gtools.get("stress"):
+                seq_items.append(_with_time(gtools["stress"], burn_s))
+            if gtools.get("vram"):
+                seq_items.append(_with_time(gtools["vram"], vram_s))
+        if has_ssd:
+            seq_items.append({"kind": "pause", "id": "", "time_s": cool_s})
+            seq_items.append({"kind": "fio", "id": "heat_rand_mixed_1h", "time_s": burn_s})
+            seq_items.append({"kind": "fio", "id": "stab_verify_crc_30m", "time_s": crc_s})
+        blocks.append({"mode": "seq", "items": seq_items})
+
+    if include_perf:
+        perf_items: List[Dict] = [{"kind": "bench", "id": "ram_stream", "time_s": 0}]
+        if has_gpu and gtools.get("perf"):
+            perf_items.append(_with_time(gtools["perf"], 0))
+        if has_ssd:
+            perf_items.append({"kind": "fio", "id": "peak_suite_all", "time_s": 0})
+        blocks.append({"mode": "seq", "items": perf_items})
+
+    mode_lbl = "parallèle" if mode == "par" else "séquentiel"
+    return {
+        "id": prof["id"],
+        "slug": prof["id"],
+        "name": f"{prof['name']} — {tcfg['label']} ({mode_lbl})",
+        "description": prof["desc"],
+        "cooldown_s": cool_s,
+        "blocks": blocks,
+        "gpu_label": gtools.get("label", "") if has_gpu else "",
+        "needs_gpu": has_gpu,
+        "needs_ssd": has_ssd,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Dossier de campagne et rapports
 # ─────────────────────────────────────────────────────────────────────────────
 

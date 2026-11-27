@@ -186,10 +186,13 @@ Un groupe `parallel` lance ses tests simultanément ; la durée de chaque test p
   {"bench": "gpu_vram_test", "params": {"time_s": 300}}
 ]}
 ```
-Exemple livré : `./cli.py --suite burn_parallele --fio-path /mnt/data`. Les mêmes séquences se composent dans l'interface (onglet
-« Séquence automatique ») et s'enregistrent dans `~/.benchsuite/suites/`. Un seul relevé électronique + inventaire couvre le groupe ; une
-panne matérielle critique ou un arrêt stoppe tous les tests du groupe. Deux tests GPU, ou deux tests fio sur le même disque, dans un même
-groupe se partagent la ressource : les mesures sont faussées (avertissement affiché).
+Profils prêts à l'emploi livrés :
+- `./cli.py --suite cpu_ram_gpu_ssd --fio-path /mnt/data` (ou plusieurs disques : `--fio-path /dev/nvme0n1,/dev/nvme1n1`)
+- `./cli.py --suite cpu_ram_gpu`
+- `./cli.py --suite cpu_ram_ssd --fio-path /mnt/data`
+- `./cli.py --suite burn_parallele --fio-path /mnt/data`
+
+Les mêmes séquences se choisissent en un clic dans l'interface (onglet « Séquence automatique » : profil, palier 10 min / 30 min / 2 h, mode parallèle ou séquentiel, option performance en fin, multi-disques par cases à cocher) et s'enregistrent dans `~/.benchsuite/suites/`. Un seul relevé électronique + inventaire couvre le groupe ; une panne matérielle critique ou un arrêt stoppe tous les tests du groupe. Deux tests GPU, ou deux tests fio sur le même disque, dans un même groupe se partagent la ressource : les mesures sont faussées (avertissement affiché).
 
 ## Machine déjà configurée : aucune installation, guide d'installation
 

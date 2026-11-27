@@ -134,7 +134,7 @@ def parallel_conflicts(step: Dict) -> List[str]:
     gpu = [s for s in subs if "bench" in s and str(s["bench"]).startswith("gpu")]
     if len(gpu) > 1:
         warns.append("Plusieurs tests GPU en même temps : ils se partagent les GPU (mesures faussées). Séparez-les ou ciblez des GPU différents.")
-    paths = [s.get("path") for s in subs if "fio" in s]
+    paths = [p.strip() for s in subs if "fio" in s for p in str(s.get("path") or "").split(",") if p.strip()]
     if len(paths) > 1 and len(set(paths)) < len(paths):
         warns.append("Deux tests fio visent le même disque : les débits se gêneront.")
     cpu = [s for s in subs if "stress" in s or s.get("bench") in ("cpu_stress", "ram_stream")]
@@ -266,7 +266,8 @@ def _run_step_inner(step: Dict, cb: Optional[Callable] = None, series_cb: Option
             from core.fio_runner import run_fio_from_params, run_fio_suite
             prof = get_profile(step["fio"])
             path = step.get("path") or defaults.get("fio_path") or "/tmp"
-            raw = path.startswith("/dev/")
+            parts_p = [p.strip() for p in str(path).split(",") if p.strip()]
+            raw = bool(parts_p) and all(p.startswith("/dev/") for p in parts_p)
             stop = kill_event.is_set
             name = f"fio — {prof['name']}"
             if prof.get("is_suite"):
