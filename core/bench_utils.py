@@ -191,6 +191,11 @@ def forget_tool_cache() -> None:
     """Oublie les outils déjà cherchés (après une installation, un changement de chemin ou un clic sur « Actualiser »)."""
     with _TOOL_CACHE_LOCK:
         _TOOL_CACHE.clear()
+    try:
+        from core import axelera_aipu
+        axelera_aipu.forget_cache()
+    except Exception:
+        pass
 
 
 def _tool_cached(key: str, finder):
@@ -215,6 +220,16 @@ def _find_tool_path_uncached(name: str) -> str:
     custom = get_custom_tool_path(name)
     if custom and os.path.isfile(custom) and os.access(custom, os.X_OK) and _has_valid_exec_format(custom):
         return custom
+
+    # 1b. Outils Voyager SDK (Axelera) : venv ou dossier SDK configuré / détecté
+    if name in ("axdevice", "axmonitor", "axrunmodel", "axlogdevice", "axdownloadmodel", "axzoo", "axversion"):
+        try:
+            from core import axelera_aipu
+            ax_path = axelera_aipu.find_tool(name)
+            if ax_path:
+                return ax_path
+        except Exception:
+            pass
 
     # 2. Variable d'environnement (ex: NVBANDWIDTH_PATH, GPU_BURN_PATH)
     env_var = f"{name.upper().replace('-', '_')}_PATH"

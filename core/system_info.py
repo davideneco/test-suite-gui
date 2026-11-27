@@ -1401,9 +1401,9 @@ def _get_amd_vram_info(bus_id: str) -> tuple:
     return vram_tot_mo, vram_used_mo
 
 
-# Accélérateurs de calcul « externes » reconnus (classe PCI 1200) : Habana/Intel Gaudi, Huawei Ascend.
+# Accélérateurs de calcul « externes » reconnus (classe PCI 1200) : Habana/Intel Gaudi, Huawei Ascend, Axelera AI Metis.
 # Les accélérateurs intégrés au CPU (Intel QAT, DSA, IAA, DLB…) ne sont PAS des GPU.
-_ACCEL_VENDORS = {"1da3", "19e5"}
+_ACCEL_VENDORS = {"1da3", "19e5", "1f9d"}
 
 
 def _is_gpu_pci_line(line: str) -> bool:
@@ -1474,12 +1474,18 @@ def get_gpu_info() -> list:
                     continue
                 desc = line.split(": ", 1)[-1].strip()
                 pcie = _get_pcie_info(bus)
-                fabricant = "Intel" if "Intel" in desc else ("AMD" if any(x in desc for x in ("AMD", "ATI")) else ("NVIDIA" if "NVIDIA" in desc else "Autre"))
-                
+                is_axelera = "axelera" in desc.lower() or "[1f9d:" in desc.lower()
+                fabricant = (
+                    "Axelera" if is_axelera else
+                    ("Intel" if "Intel" in desc else
+                     ("AMD" if any(x in desc for x in ("AMD", "ATI")) else
+                      ("NVIDIA" if "NVIDIA" in desc else "Autre")))
+                )
+
                 # Lectures sysfs en direct pour AMD / Intel / NVIDIA (si nvidia-smi absent)
                 temp = _get_gpu_temp_sysfs(bus)
                 power = _get_gpu_power_sysfs(bus)
-                
+
                 vram_tot = ""
                 if fabricant == "AMD":
                     vram_tot, _ = _get_amd_vram_info(bus)
@@ -1516,6 +1522,12 @@ def get_gpu_info() -> list:
                         from core import intel_gpu
                         intel_gpu.enrich(gpu)
                         intel_gpu.enrich_hwmon(gpu)
+                    except Exception:
+                        pass
+                elif fabricant == "Axelera":
+                    try:
+                        from core import axelera_aipu
+                        axelera_aipu.enrich(gpu)
                     except Exception:
                         pass
                 gpus.append(gpu)

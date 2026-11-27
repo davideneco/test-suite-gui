@@ -29,6 +29,7 @@ GROUPS: List[Tuple[str, str, str]] = [
     ("nvidia", "GPU NVIDIA", "Le pilote NVIDIA n'est jamais installé ni modifié par BenchSuite."),
     ("intel", "GPU Intel (Arc, Data Center GPU)", "xpu-smi donne températures, puissance, fréquence et utilisation ; le runtime OpenCL permet les tests de calcul."),
     ("amd", "GPU AMD", "Optionnel : températures hotspot / VRAM."),
+    ("axelera", "Accélérateurs Axelera AI (Metis)", "Pilote noyau metis-dkms et Voyager SDK (axdevice, axmonitor, axrunmodel) pour les cartes M.2 / PCIe 110m, 113m, 130p, 150p."),
     ("compute", "Calcul OpenCL / Vulkan (toutes marques)", "Tests de calcul et de bande passante sur n'importe quel GPU."),
 ]
 
@@ -174,6 +175,44 @@ TOOLS: List[Dict] = [
        {"bins": ["lact"]}, [{"label": "Paquet .deb de la page des versions", "cmd": "# télécharger le .deb correspondant à votre distribution, puis :\nsudo apt install ./lact-*.deb"}],
        [("Projet / versions", "https://github.com/ilya-zlobintsev/LACT/releases")]),
 
+    # ── Axelera AI (Metis) ────────────────────────────────────────────────────
+    _t("metis-dkms", "axelera", "Pilote noyau Axelera Metis (metis-dkms)",
+       "Module noyau Linux `metis.ko` et nœuds `/dev/metis-*` pour les cartes Metis M.2 / PCIe (110m, 113m, 130p, 150p).", RECOMMANDE,
+       ["Infos système", "Axelera — Chauffe & Stabilité AIPU"],
+       {"glob": ["/sys/class/metis/version"]},
+       [{"label": _APT + " — en-têtes noyau puis pilote via axdevice ou dépôt Axelera",
+         "cmd": "sudo apt install -y linux-headers-$(uname -r) dkms\naxdevice driver --install     # ou depuis https://github.com/axelera-ai-hub/axelera-driver"}],
+       [("Pilote Linux (GitHub)", "https://github.com/axelera-ai-hub/axelera-driver"),
+        ("Documentation PCIe", "https://docs.axelera.ai/docs/hardware/support/troubleshooting/pcie-troubleshooting/")],
+       "Sans droits root, /sys/class/metis/version reste lisible pour vérifier la version du module chargé.",
+       apt=["dkms"]),
+    _t("axdevice", "axelera", "Voyager SDK — axdevice",
+       "Liste les cartes Metis, versions firmware/BC, horloges, MVM et configure throttling/puissance/fréquences.", RECOMMANDE,
+       ["Axelera — Chauffe & Stabilité AIPU", "Télémétrie Axelera"],
+       {"bins": ["axdevice"]},
+       [{"label": "Installation Voyager SDK (venv utilisateur, sans modifier le système)",
+         "cmd": "git clone https://github.com/axelera-ai-hub/voyager-sdk.git\ncd voyager-sdk && ./install-dependencies.sh\n"
+                "python3 -m venv venv && source venv/bin/activate\n"
+                "pip install --extra-index-url https://software.axelera.ai/artifactory/api/pypi/axelera-pypi/simple axelera-rt axelera-devkit[all]"}],
+       [("Voyager SDK (GitHub)", "https://github.com/axelera-ai-hub/voyager-sdk"),
+        ("Manuel axdevice", "https://docs.axelera.ai/sdk/reference/tools/axdevice/")],
+       "BenchSuite détecte automatiquement ~/voyager-sdk/venv et le chemin choisi dans la page Axelera AI."),
+    _t("axrunmodel", "axelera", "Voyager SDK — axrunmodel",
+       "Exécute un modèle compilé (`model.json`) en boucle directement sur l'AIPU (chauffe, stabilité et débit FPS).", OPTIONNEL,
+       ["Axelera — Chauffe & Stabilité AIPU"],
+       {"bins": ["axrunmodel"]},
+       [{"label": "Inclus dans Voyager SDK (ou `axdownloadmodel <modele> --target metis` pour récupérer un modèle précompilé)",
+         "cmd": "source ~/voyager-sdk/venv/bin/activate\naxdownloadmodel yolov8s-coco-onnx --target metis"}],
+       [("Manuel axrunmodel", "https://docs.axelera.ai/sdk/reference/tools/axrunmodel/")]),
+    _t("axmonitor", "axelera", "Voyager SDK — axmonitor (+ axsystemserver)",
+       "Températures par cœur, puissance INA236, KPS, DDR et bande passante PCIe DMA des cartes Metis.", OPTIONNEL,
+       ["Télémétrie Axelera", "Axelera — Chauffe & Stabilité AIPU"],
+       {"bins": ["axmonitor"]},
+       [{"label": "Démarrer le service backend sur la machine cible",
+         "cmd": "sudo systemctl enable --now axsystemserver.service\naxmonitor --server-address 127.0.0.1:5555 --ui console -c print"}],
+       [("Manuel axmonitor", "https://docs.axelera.ai/sdk/user-guides/axmonitor/"),
+        ("Gestion thermique & puissance", "https://docs.axelera.ai/sdk/user-guides/thermal/")]),
+
     # ── OpenCL / Vulkan ───────────────────────────────────────────────────────
     _t("clinfo", "compute", "clinfo + chargeur OpenCL", "Liste les plateformes et GPU OpenCL (sert à choisir -p N).", RECOMMANDE, ["Compute OpenCL"],
        {"bins": ["clinfo"]}, [{"label": _APT, "cmd": "sudo apt install -y clinfo ocl-icd-libopencl1"}], [("clinfo", "https://github.com/Oblomov/clinfo")],
@@ -232,12 +271,25 @@ def detect(tool: Dict) -> Tuple[bool, str, str]:
             from core.install_advisor import _which, _version
             for b in check["bins"]:
                 p = _which(b)
+                if not p and b in ("axdevice", "axmonitor", "axrunmodel", "axlogdevice", "axdownloadmodel"):
+                    try:
+                        from core import axelera_aipu
+                        p = axelera_aipu.find_tool(b)
+                    except Exception:
+                        pass
                 if p:
                     return True, p, _version(b, p)
         for pat in check.get("glob", []):
             m = [x for x in _expand(pat) if os.path.exists(x)]
             if m:
-                return True, m[0], ""
+                ver = ""
+                if pat == "/sys/class/metis/version":
+                    try:
+                        with open(m[0], encoding="utf-8", errors="replace") as f:
+                            ver = f.read().strip()
+                    except Exception:
+                        pass
+                return True, m[0], ver
     except Exception:
         pass
     return False, "", ""
@@ -254,12 +306,12 @@ def apt_command_for_missing(missing_ids: List[str]) -> str:
     return ("sudo apt install -y --no-upgrade " + " ".join(pk)) if pk else ""
 
 
-# Groupes de GPU conditionnés par la présence d'un GPU de la marque : identifiant de groupe → (identifiant PCI constructeur, nom)
-GROUP_VENDOR = {"nvidia": ("10de", "NVIDIA"), "intel": ("8086", "Intel"), "amd": ("1002", "AMD")}
+# Groupes de GPU / accélérateurs conditionnés par la présence de la marque : identifiant de groupe → (identifiant PCI constructeur, nom)
+GROUP_VENDOR = {"nvidia": ("10de", "NVIDIA"), "intel": ("8086", "Intel"), "amd": ("1002", "AMD"), "axelera": ("1f9d", "Axelera AI")}
 
 
 def detect_gpu_vendors() -> set:
-    """Constructeurs de GPU présents sur la machine (identifiants PCI 10de / 8086 / 1002) d'après lspci ; vide si lspci est absent.
+    """Constructeurs de GPU / accélérateurs présents sur la machine (10de / 8086 / 1002 / 1f9d) d'après lspci ; vide si lspci est absent.
     Sert à marquer « non concerné » les outils d'une marque absente (sans les compter comme manquants)."""
     found = set()
     try:
@@ -268,7 +320,7 @@ def detect_gpu_vendors() -> set:
         import re
         for line in out.splitlines():
             if re.search(r"\[03(00|02|80)\]|\[1200\]", line):
-                for vid in ("10de", "8086", "1002"):
+                for vid in ("10de", "8086", "1002", "1f9d"):
                     if f"[{vid}:" in line.lower():
                         found.add(vid)
     except Exception:

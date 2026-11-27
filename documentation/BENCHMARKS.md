@@ -86,6 +86,18 @@ Ce document répertorie l'ensemble des modules de test intégrés dans BenchSuit
 
 ---
 
+## 3 bis. Catégorie « Axelera AI »
+
+### `axelera_stress` — Axelera — Chauffe & Stabilité AIPU
+- **Outils :** `axrunmodel`, `inference.py`, `axdevice`, `axmonitor`, `axdownloadmodel` (Voyager SDK) + pilote noyau `metis` (`metis-dkms`).
+- **Interface dédiée :** Page **« Test & modèles AIPU »** (`ui/axelera_page.py`) permettant de pointer vers un dossier Voyager SDK / venv, détecter les cartes Metis (PCI Vendor ID `1f9d`, modèles `110m`, `113m`, `130p`, `150p`), suivre températures/puissance/horloge/MVM/KPS en temps réel, charger un modèle compilé (`model.json`, `.axm`, `.axe`) ou du Model Zoo (`axdownloadmodel`), lancer les tests et ajuster les paramètres `axdevice` (horloge, limite MVM, throttling logiciel, limite de puissance `113m`).
+- **Modes :**
+  - `axrunmodel` *(défaut chauffe/stabilité)* : exécute en boucle un `model.json` compilé directement sur les cœurs AIPU (1–4) pendant `time_s` secondes sans goulot d'entrée vidéo.
+  - `inference.py` : pipeline complet GStreamer + AIPU (`--no-display --show-host-fps`) sur un fichier vidéo/média, bouclé jusqu'à `time_s` secondes si demandé.
+- **Métriques & sécurité :** `device_fps`, `host_fps`, `system_fps` (score principal), températures cœur / carte (`temp_max_c`, `temp_moy_c`), puissance INA236 (`power_max_w`, `power_moy_w`), horloge AIPU (`aipuN_clock_moy_mhz`), utilisation MVM (`aipuN_mvm_moy_pct`), détection du throttling thermique et des erreurs noyau `axl` / `metis` dans `FaultMonitor`. Seuils thermiques de jonction documentés : alerte `95 °C`, throttling matériel `105 °C`, arrêt thermique `120 °C`.
+
+---
+
 ## 4. Catégorie « Réseau »
 
 ### `net_iperf_tcp` / `net_iperf_udp` — Réseau iperf3 (client)

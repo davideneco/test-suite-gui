@@ -153,6 +153,22 @@ def _universal_rules(results, gv: Dict[int, Dict[str, float]], cfg: Dict) -> Lis
                            "GPU " + ", ".join(map(str, th))))
     elif gv:
         rules.append(_rule("no_throttle", "Aucun throttling thermique signalé par le pilote", PASS))
+    # 3a. Axelera AIPU : throttling et seuils thermiques jonction (95 °C warning / 105 °C throttle / 120 °C shutdown)
+    for r in results:
+        if getattr(r, "category", "") != "Axelera AI":
+            continue
+        m = r.metrics or {}
+        th_ax = int(_num(m.get("axelera_throttle_samples")) or 0)
+        tmax = _num(m.get("temp_max_c"))
+        if tmax is not None and tmax >= 120.0:
+            rules.append(_rule("axelera_shutdown_temp", f"Température critique Axelera atteinte ({tmax:.1f} °C ≥ 120 °C)", FAIL))
+        elif th_ax > 0 or (tmax is not None and tmax >= 105.0):
+            rules.append(_rule("axelera_throttle", "Throttling thermique Axelera AIPU détecté", cfg["throttle_level"],
+                               f"Tmax {tmax:.1f} °C" if tmax is not None else f"{th_ax} échantillon(s)"))
+        elif tmax is not None and tmax >= 95.0:
+            rules.append(_rule("axelera_temp_warn", f"Température Axelera élevée ({tmax:.1f} °C ≥ 95 °C)", WARN))
+        elif tmax is not None:
+            rules.append(_rule("axelera_temp_ok", f"Température Axelera maîtrisée ({tmax:.1f} °C)", PASS))
     # 3b. Chauffe prolongée (vkpeak / clpeak en boucle) : le GPU garde-t-il ses performances à température stabilisée ?
     for r in results:
         for k, v in (r.metrics or {}).items():

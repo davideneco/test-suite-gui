@@ -491,6 +491,76 @@ sudo apt install ./lact-*.deb
 
 Liens : [Projet / versions](https://github.com/ilya-zlobintsev/LACT/releases)
 
+## Accélérateurs Axelera AI (Metis)
+
+Pilote noyau metis-dkms et Voyager SDK (axdevice, axmonitor, axrunmodel) pour les cartes M.2 / PCIe 110m, 113m, 130p, 150p.
+
+### Pilote noyau Axelera Metis (metis-dkms) — *recommandé*
+
+Module noyau Linux `metis.ko` et nœuds `/dev/metis-*` pour les cartes Metis M.2 / PCIe (110m, 113m, 130p, 150p).
+
+Utilisé par : Infos système, Axelera — Chauffe & Stabilité AIPU
+
+**Ubuntu / Debian (apt) — en-têtes noyau puis pilote via axdevice ou dépôt Axelera**
+
+```bash
+sudo apt install -y linux-headers-$(uname -r) dkms
+axdevice driver --install     # ou depuis https://github.com/axelera-ai-hub/axelera-driver
+```
+
+Sans droits root, /sys/class/metis/version reste lisible pour vérifier la version du module chargé.
+
+Liens : [Pilote Linux (GitHub)](https://github.com/axelera-ai-hub/axelera-driver) · [Documentation PCIe](https://docs.axelera.ai/docs/hardware/support/troubleshooting/pcie-troubleshooting/)
+
+### Voyager SDK — axdevice — *recommandé*
+
+Liste les cartes Metis, versions firmware/BC, horloges, MVM et configure throttling/puissance/fréquences.
+
+Utilisé par : Axelera — Chauffe & Stabilité AIPU, Télémétrie Axelera
+
+**Installation Voyager SDK (venv utilisateur, sans modifier le système)**
+
+```bash
+git clone https://github.com/axelera-ai-hub/voyager-sdk.git
+cd voyager-sdk && ./install-dependencies.sh
+python3 -m venv venv && source venv/bin/activate
+pip install --extra-index-url https://software.axelera.ai/artifactory/api/pypi/axelera-pypi/simple axelera-rt axelera-devkit[all]
+```
+
+BenchSuite détecte automatiquement ~/voyager-sdk/venv et le chemin choisi dans la page Axelera AI.
+
+Liens : [Voyager SDK (GitHub)](https://github.com/axelera-ai-hub/voyager-sdk) · [Manuel axdevice](https://docs.axelera.ai/sdk/reference/tools/axdevice/)
+
+### Voyager SDK — axrunmodel — *optionnel*
+
+Exécute un modèle compilé (`model.json`) en boucle directement sur l'AIPU (chauffe, stabilité et débit FPS).
+
+Utilisé par : Axelera — Chauffe & Stabilité AIPU
+
+**Inclus dans Voyager SDK (ou `axdownloadmodel <modele> --target metis` pour récupérer un modèle précompilé)**
+
+```bash
+source ~/voyager-sdk/venv/bin/activate
+axdownloadmodel yolov8s-coco-onnx --target metis
+```
+
+Liens : [Manuel axrunmodel](https://docs.axelera.ai/sdk/reference/tools/axrunmodel/)
+
+### Voyager SDK — axmonitor (+ axsystemserver) — *optionnel*
+
+Températures par cœur, puissance INA236, KPS, DDR et bande passante PCIe DMA des cartes Metis.
+
+Utilisé par : Télémétrie Axelera, Axelera — Chauffe & Stabilité AIPU
+
+**Démarrer le service backend sur la machine cible**
+
+```bash
+sudo systemctl enable --now axsystemserver.service
+axmonitor --server-address 127.0.0.1:5555 --ui console -c print
+```
+
+Liens : [Manuel axmonitor](https://docs.axelera.ai/sdk/user-guides/axmonitor/) · [Gestion thermique & puissance](https://docs.axelera.ai/sdk/user-guides/thermal/)
+
 ## Calcul OpenCL / Vulkan (toutes marques)
 
 Tests de calcul et de bande passante sur n'importe quel GPU.
@@ -582,3 +652,4 @@ mkdir -p ~/.local/bin && mv vkpeak ~/.local/bin/ && chmod +x ~/.local/bin/vkpeak
 ```
 
 Liens : [Projet / versions](https://github.com/nihui/vkpeak/releases)
+

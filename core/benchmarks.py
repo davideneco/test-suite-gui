@@ -191,6 +191,7 @@ from core.bench_compute import (  # noqa: F401
     parse_dcgm_json,
     parse_vkpeak_output,
 )
+from core.bench_axelera import bench_axelera_stress  # noqa: F401
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -987,14 +988,19 @@ CATALOG = [
          desc="Mesure de bande passante inter-GPU et CPU-GPU (nvbandwidth)",
          requires=["nvbandwidth"], fn=bench_gpu_nvbandwidth,
          params={"buffer_size_mb": 512, "iterations": 3}),
+    dict(id="axelera_stress", name="Axelera — Chauffe & Stabilité AIPU", category="Axelera AI",
+         desc="Charge IA continue et test de modèles sur cartes Axelera Metis (axrunmodel / inference.py) : température, puissance, horloge, MVM et stabilité FPS",
+         requires=["axdevice"], fn=bench_axelera_stress,
+         params={"model_path": "", "engine": "auto", "media_path": "", "time_s": 60, "aipu_cores": 4, "target_devices": "", "throttle_fps": 0, "sdk_dir": "", "extra_args": ""}),
 ]
 
-CAT_ORDER  = ["CPU + RAM", "Stockage", "GPU", "Réseau"]
+CAT_ORDER  = ["CPU + RAM", "Stockage", "GPU", "Axelera AI", "Réseau"]
 CAT_COLORS = {
     "CPU + RAM": "#f97316",
     "CPU":       "#f97316",
     "RAM":       "#22d3ee",
     "Stockage":  "#e879f9",
     "GPU":       "#a78bfa",
+    "Axelera AI": "#38bdf8",
     "Réseau":    "#34d399",
 }

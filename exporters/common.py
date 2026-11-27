@@ -737,6 +737,7 @@ def _series_for_result(r: BenchmarkResult):
         ("ram_used_gb", "RAM utilisée Go"), ("ram_pct", "RAM %"),
         ("ram_write_mibs", "Écriture Mo/s"), ("ram_read_mibs", "Lecture Mo/s"),
         ("ram_errors", "Erreurs RAM"), ("ram_temp", "Température RAM °C"), ("ram_power", "Puissance RAM W"),
+        ("series_mvm_util", "Utilisation MVM %"), ("series_kps", "Cadence KPS / FPS"),
     ]
     found = []
     for k, label in candidates:
@@ -747,17 +748,18 @@ def _series_for_result(r: BenchmarkResult):
             v = s_dict.get("power") or s_dict.get("disk_power") or s_dict.get("ssd_power")
         if isinstance(v, list) and len(v) >= 2:
             found.append((k, label, v))
-    # GPU multi: gpu0_temp, gpu1_power, etc.
+    # GPU multi: gpu0_temp, gpu1_power, etc. + AIPU multi: aipu0_temp, aipu0_power...
     for k, v in m.items():
-        if isinstance(v, list) and len(v) >= 2 and k.startswith("gpu"):
+        if isinstance(v, list) and len(v) >= 2 and k.startswith(("gpu", "aipu")):
             if k not in [x[0] for x in found]:
-                mg = re.match(r"^gpu(\d+)_(.+)$", k)
+                mg = re.match(r"^(gpu|aipu)(\d+)_(.+)$", k)
                 if mg:
-                    g_idx = int(mg.group(1))
-                    s_type = mg.group(2)
+                    kind_p, g_idx, s_type = mg.group(1), int(mg.group(2)), mg.group(3)
                     s_name = {"temp": "Cœur °C", "temp_hotspot": "Hotspot °C", "temp_vram": "VRAM °C",
-                              "power": "Puissance W", "freq_graphics": "Fréq GPU MHz", "freq_memory": "Fréq VRAM MHz"}.get(s_type, s_type)
-                    label = f"GPU {g_idx} {s_name}"
+                              "power": "Puissance W", "freq_graphics": "Fréq GPU MHz", "freq_memory": "Fréq VRAM MHz",
+                              "clock_mhz": "Horloge MHz", "mvm_pct": "MVM %", "kps": "KPS"}.get(s_type, s_type)
+                    prefix_lbl = "AIPU" if kind_p == "aipu" else "GPU"
+                    label = f"{prefix_lbl} {g_idx} {s_name}"
                 else:
                     label = k
                 found.append((k, label, v))

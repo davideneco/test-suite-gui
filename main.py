@@ -29,7 +29,7 @@ from exporters.export import (export_html, export_all, save_to_history, load_his
 
 APP_ID     = "io.benchsuite.app"
 APP_NAME   = "BenchSuite"
-VERSION    = "1.0.23"
+VERSION    = "1.0.24"
 OUTPUT_DIR = os.path.expanduser("~/BenchmarkResults")
 
 _VERSION_DISPLAY: list = []
@@ -2080,6 +2080,7 @@ _NAV_ORDER = ["cpu_stress", "ram_stream",
               "storage_fio_nvme", "storage_fio_hdd",
               "gpu_burn", "gpu_fryer", "gpu_oclburn", "gpu_dcgm", "gpu_vram_test",
               "gpu_clpeak", "gpu_vkpeak", "gpu_vram_bw", "gpu_nvbandwidth",
+              "axelera_stress",
               "net_iperf_tcp", "net_iperf_udp"]
 
 # Sous-groupes du menu pour les catégories chargées (GPU : 9 tests + 2 pages de configuration).
@@ -2090,7 +2091,8 @@ _NAV_SUB = {"GPU": {"gpu_burn": "Chauffe / stabilité", "gpu_fryer": "Chauffe / 
 
 # Noms courts pour le menu (le groupe dit déjà la catégorie) ; le nom complet reste en info-bulle et sur la page.
 _NAV_SHORT = {"CPU + RAM": "Burn CPU + RAM", "RAM — Bande passante (STREAM)": "Bande passante RAM",
-              "GPU Compute fryer": "gpu-fryer", "GPU gpu-burn": "gpu-burn", "GPU nvbandwidth": "nvbandwidth"}
+              "GPU Compute fryer": "gpu-fryer", "GPU gpu-burn": "gpu-burn", "GPU nvbandwidth": "nvbandwidth",
+              "Axelera — Chauffe & Stabilité AIPU": "Test & modèles AIPU"}
 
 
 def _nav_short_name(name: str, cat: str) -> str:
@@ -2252,6 +2254,7 @@ class BenchWindow(Adw.ApplicationWindow):
         # ── Pages benchmark ──
         from ui.fio_page import FioPage
         from ui.stress_page import StressPage
+        from ui.axelera_page import AxeleraPage
         from ui.system_info_page import SystemInfoPage
         sorted_cat = sorted(CATALOG,
                             key=lambda b: CAT_ORDER.index(b["category"]) if b["category"] in CAT_ORDER else 99)
@@ -2262,6 +2265,8 @@ class BenchWindow(Adw.ApplicationWindow):
                 page = FioPage(self, disk_filter="hdd")
             elif bd["id"] == "cpu_stress":
                 page = StressPage(self)
+            elif bd["id"] == "axelera_stress":
+                page = AxeleraPage(self)
             else:
                 page = BenchPage(bd, self)
             self._bench_pages[bd["id"]] = page
@@ -2398,13 +2403,13 @@ class BenchWindow(Adw.ApplicationWindow):
                 cpu = str(info.get("cpu_model") or "inconnu")
                 put("cpu", cpu if len(cpu) < 34 else cpu[:32] + "…", f"{info.get('cpu_threads', '?')} threads")
                 put("ram", f"{info.get('ram_gb', '?')} Go", "")
-                real = [g for g in gpus if g.get("fabricant") in ("NVIDIA", "AMD", "Intel")]
+                real = [g for g in gpus if g.get("fabricant") in ("NVIDIA", "AMD", "Intel", "Axelera")]
                 if real:
                     names = sorted({(g.get("nom") or g.get("modele") or "GPU").replace("NVIDIA ", "").replace("Intel(R) ", "").replace("(TM) ", "")
                                     for g in real})
                     put("gpu", f"{len(real)} détecté(s)", ", ".join(names)[:80])
                 else:
-                    put("gpu", "aucun GPU", "NVIDIA / AMD / Intel non détecté")
+                    put("gpu", "aucun GPU", "NVIDIA / AMD / Intel / Axelera non détecté")
                 return False
             GLib.idle_add(apply)
 
@@ -2477,7 +2482,7 @@ class BenchWindow(Adw.ApplicationWindow):
         scroll.set_child(inner); box.append(scroll)
         return box
 
-    _NAV_ICONS = {"CPU + RAM": "🧠", "Stockage": "💾", "GPU": "🎮", "Réseau": "🌐"}
+    _NAV_ICONS = {"CPU + RAM": "🧠", "Stockage": "💾", "GPU": "🎮", "Axelera AI": "🤖", "Réseau": "🌐"}
 
     def _build_sidebar(self):
         """Menu latéral : recherche, groupes repliables, icônes, libellés alignés à gauche et tronqués proprement."""

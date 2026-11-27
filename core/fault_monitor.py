@@ -45,6 +45,12 @@ _PATTERNS = [
     (re.compile(r"blk_update_request: I/O error|Buffer I/O error|I/O error, dev ", re.I), "warning", "Erreur d'E/S disque"),
     (re.compile(r"Out of memory:|oom-kill|Killed process", re.I), "critical", "Manque de mémoire (OOM killer)"),
     (re.compile(r"NVLink.*(error|fail)|nvidia-nvswitch.*(error|fail|fatal)", re.I), "warning", "Erreur NVLink / NVSwitch"),
+    (re.compile(r"\baxl\s+[0-9a-f:.]+:.*(Fail to dma alloc|Failed to request resources|probe .* failed|fatal|error\s*-?\d+)", re.I),
+     "critical", "Erreur pilote Axelera Metis"),
+    (re.compile(r"metis.*(thermal shutdown|over.?temp|disconnect|timeout|reset)", re.I),
+     "critical", "Défaillance matérielle Axelera Metis"),
+    (re.compile(r"\baxl\s+[0-9a-f:.]+:.*(warn|throttl)|metis.*(warning|throttl)", re.I),
+     "warning", "Avertissement thermique Axelera Metis"),
 ]
 _XID_RE = re.compile(r"NVRM: Xid \((?P<bus>[^)]*)\):\s*(?P<code>\d+)")
 

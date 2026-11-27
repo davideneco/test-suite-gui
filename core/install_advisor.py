@@ -148,14 +148,21 @@ def collect() -> Dict:
 
     # Outils système
     tools = {}
-    for t in list(_APT) + ["gpu-fryer", "dcgmi", "nvbandwidth", "clpeak", "vkpeak", "cargo", "cmake", "git", "make", "nvcc", "nv-hostengine", "xpu-smi"]:
+    for t in list(_APT) + ["gpu-fryer", "dcgmi", "nvbandwidth", "clpeak", "vkpeak", "cargo", "cmake", "git", "make", "nvcc", "nv-hostengine", "xpu-smi", "axdevice", "axmonitor", "axrunmodel"]:
         p = _which(t)
+        if not p and t in ("axdevice", "axmonitor", "axrunmodel"):
+            try:
+                from core import axelera_aipu
+                p = axelera_aipu.find_tool(t)
+            except Exception:
+                pass
         tools[t] = {"path": p, "version": _version(t, p)}
     st["tools"] = tools
 
-    # GPU Intel présents (classe PCI affichage / 3D, constructeur Intel)
-    st["intel_gpu"] = any("intel" in l.lower() and re.search(r"\[03(00|02|80)\]", l)
-                          for l in (_run(["lspci", "-nn"])[1] if shutil.which("lspci") else "").splitlines())
+    # GPU Intel et accélérateurs Axelera (1f9d) présents sur le bus PCI
+    lspci_lines = (_run(["lspci", "-nn"])[1] if shutil.which("lspci") else "").splitlines()
+    st["intel_gpu"] = any("intel" in l.lower() and re.search(r"\[03(00|02|80)\]", l) for l in lspci_lines)
+    st["axelera_aipu"] = any("[1f9d:" in l.lower() or ("axelera" in l.lower() and re.search(r"\[1200\]", l)) for l in lspci_lines)
 
     # NVIDIA
     nv: Dict = {"present": bool(shutil.which("nvidia-smi")) and nvidia_gpu_present(), "ok": False, "driver": "", "cuda_max": "", "caps": [], "names": [], "error": ""}
@@ -315,6 +322,28 @@ def render(st: Dict) -> str:
             L += [f"  {bad} xpu-smi absent : seule la température exposée par le noyau est lue (sysfs).",
                   "    → paquet « xpu-smi » du dépôt APT Intel GPU (https://dgpu-docs.intel.com/ : ajouter le dépôt de votre distribution,",
                   f"      puis {sudo}apt-get install -y --no-upgrade xpu-smi). Rien n'est installé automatiquement."]
+        L.append("")
+
+    # 3a-bis. Accélérateurs Axelera AI (Metis)
+    if st.get("axelera_aipu"):
+        L += ["3a. Accélérateurs Axelera AI (Metis)", "-" * 40]
+        ax_drv = os.path.isfile("/sys/class/metis/version")
+        if ax_drv:
+            try:
+                with open("/sys/class/metis/version") as f:
+                    dver = f.read().strip()
+            except Exception:
+                dver = "?"
+            L.append(f"  {ok} module noyau metis chargé (version {dver})")
+        else:
+            L += [f"  {bad} module noyau metis absent (/sys/class/metis/version introuvable)",
+                  f"    → {sudo}apt install -y linux-headers-$(uname -r) dkms && axdevice driver --install"]
+        for tname in ("axdevice", "axrunmodel", "axmonitor"):
+            ti = st["tools"].get(tname, {})
+            if ti.get("path"):
+                L.append(f"  {ok} {tname:<12} {ti['path']}")
+            else:
+                L.append(f"  {bad} {tname:<12} absent (activer ou installer Voyager SDK : https://github.com/axelera-ai-hub/voyager-sdk)")
         L.append("")
 
     # 3b. GPU NVIDIA
