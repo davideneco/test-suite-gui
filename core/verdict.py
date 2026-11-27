@@ -578,7 +578,12 @@ def _dedupe_rules(rules: List[Dict]) -> List[Dict]:
         out.append(entry)
     for entry, tests, base in index.values():
         if tests:
-            tag = f"test « {tests[0]} »" if len(tests) == 1 else "tests : " + ", ".join(f"« {t} »" for t in tests)
+            if len(tests) == 1:
+                tag = f"test « {tests[0]} »"
+            elif len(tests) == 2:
+                tag = f"tests « {tests[0]} », « {tests[1]} »"
+            else:
+                tag = f"relevé sur {len(tests)} tests"
             entry["detail"] = (base + " — " if base else "") + tag
     return out
 

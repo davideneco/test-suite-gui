@@ -11,6 +11,7 @@ from core.result import BenchmarkResult
 from exporters.common import (
     _GPU_EXTRA_KEYS,
     _GPU_METRIC_RE,
+    _collect_report_alerts,
     _electrical_rows,
     _fio_matrix,
     _fmt_num,
@@ -19,11 +20,8 @@ from exporters.common import (
     _gpu_list_from,
     _gpu_rows_for_result,
     _gpu_table,
-    _hardware_fault_alerts,
     _metric_rows,
     _non_gpu_metric_items,
-    _observation_alerts,
-    _pcie_alerts,
     _pcie_link_rows,
     _report_payload,
     _safe_text,
@@ -371,13 +369,18 @@ def export_pdf(results: List[BenchmarkResult], out_dir: str,
 
     v = payload.get("verdict")
     if v:
-        vcol = {"CONFORME": "#15803d", "A_VERIFIER": "#a16207", "NON_CONFORME": "#b91c1c", "NON_EVALUE": "#475569"}[v["status"]]
-        vbg = {"CONFORME": "#dcfce7", "A_VERIFIER": "#fef9c3", "NON_CONFORME": "#fee2e2", "NON_EVALUE": "#e2e8f0"}[v["status"]]
+        vcol = {"CONFORME": "#15803d", "A_VERIFIER": "#a16207", "NON_CONFORME": "#b91c1c", "NON_EVALUE": "#475569"}.get(v.get("status"), "#475569")
+        vbg = {"CONFORME": "#dcfce7", "A_VERIFIER": "#fef9c3", "NON_CONFORME": "#fee2e2", "NON_EVALUE": "#e2e8f0"}.get(v.get("status"), "#e2e8f0")
         c = v.get("counts", {})
-        vrows = [[Paragraph(f"<b><font color='{vcol}' size='13'>VERDICT : {_html.escape(v['label'])}</font></b><br/>"
+        mo = v.get("manual_override") if isinstance(v.get("manual_override"), dict) else None
+        mo_line = ""
+        if mo:
+            reason = str(mo.get("reason") or "").strip()
+            mo_line = "<br/><font size='7'><b>Validation manuelle</b>" + (f" — {_html.escape(reason)}" if reason else "") + "</font>"
+        vrows = [[Paragraph(f"<b><font color='{vcol}' size='13'>VERDICT : {_html.escape(v['label'])}</font></b>{mo_line}<br/>"
                             f"<font size='7'>{c.get('pass', 0)} conforme(s) · {c.get('warn', 0)} à vérifier · {c.get('fail', 0)} non conforme(s) · "
                             f"{c.get('na', 0)} non évalué(s) — sources : {_html.escape(', '.join(v.get('sources', [])))}</font>", normal)]]
-        for r in v["rules"]:
+        for r in v.get("rules", []):
             if r["level"] in ("fail", "warn"):
                 mark = "X" if r["level"] == "fail" else "!"
                 det = f" — {_html.escape(r['detail'])}" if r.get("detail") else ""
@@ -388,15 +391,8 @@ def export_pdf(results: List[BenchmarkResult], out_dir: str,
         story.append(vt)
         story.append(Spacer(1, 4*mm))
 
-    # Audit matériel pour affichage dans le PDF
-    from core.system_info import run_hardware_audit
-    alerts = []
-    if system_info_data:
-        try:
-            alerts = run_hardware_audit(system_info_data)
-        except Exception:
-            pass
-    alerts = list(alerts) + _hardware_fault_alerts(results) + _observation_alerts(results, report_meta) + _pcie_alerts(results)
+    # Audit matériel et alertes dédupliquées pour affichage dans le PDF
+    alerts = _collect_report_alerts(results, system_info_data, report_meta)
 
     diag_style = ParagraphStyle("BSDiag", parent=normal, fontSize=8, leading=10, textColor=colors.HexColor("#333333"))
     

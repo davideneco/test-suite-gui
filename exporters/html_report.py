@@ -11,6 +11,7 @@ from core.result import BenchmarkResult
 from exporters.common import (
     _GPU_METRIC_RE,
     _HIDDEN_METRIC_KEYS,
+    _collect_report_alerts,
     _electrical_rows,
     _fio_matrix,
     _gpu_col,
@@ -18,10 +19,7 @@ from exporters.common import (
     _gpu_list_from,
     _gpu_rows_for_result,
     _gpu_table,
-    _hardware_fault_alerts,
-    _observation_alerts,
     _observations,
-    _pcie_alerts,
     _pcie_link_rows,
     _report_payload,
     _safe_text,
@@ -38,29 +36,77 @@ _VERDICT_COLORS = {"CONFORME": ("#a6e3a1", "rgba(166,227,161,0.12)"), "A_VERIFIE
 
 
 def _verdict_html(v: dict) -> str:
-    """Bandeau de verdict pour le tableau de bord HTML."""
+    """Bandeau de verdict interactif pour le tableau de bord HTML (suppression d'alertes + validation manuelle CONFORME)."""
     if not v:
         return ""
-    col, bg = _VERDICT_COLORS.get(v["status"], _VERDICT_COLORS["NON_EVALUE"])
+    col, bg = _VERDICT_COLORS.get(v.get("status"), _VERDICT_COLORS["NON_EVALUE"])
     sym = {"fail": "✗", "warn": "⚠", "pass": "✓", "na": "·"}
     lvl_col = {"fail": "#f38ba8", "warn": "#f9e2af", "pass": "#a6e3a1", "na": "#94a3b8"}
     c = v.get("counts", {})
+    mo = v.get("manual_override") if isinstance(v.get("manual_override"), dict) else None
+    mo_html = ""
+    if mo:
+        reason = str(mo.get("reason") or "").strip()
+        mo_html = (
+            '<div id="verdictManualNote" class="verdict-manual-note">✓ Validé manuellement en CONFORME'
+            + (f' — Motif : {_html.escape(reason)}' if reason else '')
+            + '</div>'
+        )
+    else:
+        mo_html = '<div id="verdictManualNote" class="verdict-manual-note" style="display:none"></div>'
 
-    def row(r):
+    rules = v.get("rules") or []
+
+    def row_issue(idx, r):
         det = f' <span style="color:#94a3b8">— {_html.escape(r["detail"])}</span>' if r.get("detail") else ""
-        return (f'<div style="margin:3px 0;color:{lvl_col[r["level"]]}">{sym[r["level"]]} '
+        return (
+            f'<div class="verdict-rule-row" data-rule-idx="{idx}">'
+            f'<span style="color:{lvl_col.get(r["level"], "#94a3b8")}">{sym.get(r["level"], "·")} '
+            f'<span style="color:#e2e8f0">{_html.escape(r["label"])}</span>{det}</span>'
+            f'<button type="button" class="alert-del-btn no-print" title="Supprimer cette alerte du verdict" '
+            f'onclick="dismissVerdictRule({idx})">✕</button></div>'
+        )
+
+    def row_ok(r):
+        det = f' <span style="color:#94a3b8">— {_html.escape(r["detail"])}</span>' if r.get("detail") else ""
+        return (f'<div style="margin:3px 0;color:{lvl_col.get(r["level"], "#94a3b8")}">{sym.get(r["level"], "·")} '
                 f'<span style="color:#e2e8f0">{_html.escape(r["label"])}</span>{det}</div>')
-    main = "".join(row(r) for r in v["rules"] if r["level"] in ("fail", "warn"))
-    rest = "".join(row(r) for r in v["rules"] if r["level"] in ("pass", "na"))
-    return (f'<div style="background:{bg};border:1px solid {col};border-radius:12px;padding:16px 20px;margin-bottom:20px">'
-            f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">'
-            f'<div style="font-size:22px;font-weight:800;color:{col}">VERDICT : {_html.escape(v["label"])}</div>'
-            f'<div style="font-size:12px;color:#94a3b8">{c.get("pass", 0)} conforme(s) · {c.get("warn", 0)} à vérifier · '
-            f'{c.get("fail", 0)} non conforme(s) · {c.get("na", 0)} non évalué(s)<br>Sources : {_html.escape(", ".join(v.get("sources", [])))}</div></div>'
-            + (f'<div style="margin-top:10px;font-size:13px">{main}</div>' if main else "")
-            + (f'<details style="margin-top:8px"><summary style="color:#94a3b8;cursor:pointer">Détail des contrôles réussis / non évalués ({c.get("pass", 0) + c.get("na", 0)})</summary>'
-               f'<div style="margin-top:6px;font-size:12px">{rest}</div></details>' if rest else "")
-            + '</div>')
+
+    main = "".join(row_issue(i, r) for i, r in enumerate(rules) if r.get("level") in ("fail", "warn"))
+    rest = "".join(row_ok(r) for r in rules if r.get("level") in ("pass", "na"))
+    show_force = (v.get("status") != "CONFORME") and not mo
+    show_cancel = bool(mo)
+    show_reset = bool(mo or v.get("dismissed_rules"))
+    actions = (
+        '<div class="verdict-actions no-print" id="verdictActions">'
+        + f'<button type="button" class="verdict-btn verdict-btn-ok" id="btnForceConforme" onclick="openManualConforme()" style="display:{"inline-flex" if show_force else "none"}">✓ Passer en CONFORME</button>'
+        + f'<button type="button" class="verdict-btn" id="btnCancelConforme" onclick="cancelManualConforme()" style="display:{"inline-flex" if show_cancel else "none"}">↩ Annuler validation manuelle</button>'
+        + f'<button type="button" class="verdict-btn" id="btnResetEdits" onclick="resetVerdictAndAlerts()" style="display:{"inline-flex" if show_reset else "none"}">↺ Réinitialiser</button>'
+        + '</div>'
+    )
+    manual_form = (
+        '<div id="manualConformeForm" class="manual-form no-print" style="display:none">'
+        '<input type="text" id="manualConformeReason" class="search" '
+        'placeholder="Motif de validation manuelle (optionnel, ex. câblage x8 prévu par le châssis)…">'
+        '<button type="button" class="verdict-btn verdict-btn-ok" onclick="confirmManualConforme()">✓ Confirmer CONFORME</button>'
+        '<button type="button" class="verdict-btn" onclick="closeManualConforme()">Annuler</button>'
+        '</div>'
+    )
+    return (
+        f'<div id="verdictBox" style="background:{bg};border:1px solid {col};border-radius:12px;padding:16px 20px;margin-bottom:20px">'
+        f'<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">'
+        f'<div><div id="verdictTitle" style="font-size:22px;font-weight:800;color:{col}">VERDICT : {_html.escape(v["label"])}</div>{mo_html}</div>'
+        f'<div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">'
+        f'<div id="verdictMeta" style="font-size:12px;color:#94a3b8;text-align:right">{c.get("pass", 0)} conforme(s) · {c.get("warn", 0)} à vérifier · '
+        f'{c.get("fail", 0)} non conforme(s) · {c.get("na", 0)} non évalué(s)<br>Sources : {_html.escape(", ".join(v.get("sources", [])))}</div>'
+        f'{actions}</div></div>'
+        f'{manual_form}'
+        f'<div id="verdictRulesMain" style="margin-top:10px;font-size:13px;{"" if main else "display:none;"}">{main}</div>'
+        f'<div id="verdictRulesRest">'
+        + (f'<details style="margin-top:8px"><summary style="color:#94a3b8;cursor:pointer">Détail des contrôles réussis / non évalués ({c.get("pass", 0) + c.get("na", 0)})</summary>'
+           f'<div style="margin-top:6px;font-size:12px">{rest}</div></details>' if rest else "")
+        + '</div></div>'
+    )
 
 
 def _stop_card_html(summary: dict) -> str:
@@ -293,23 +339,26 @@ def reexport_html(src_html: str, dst_html: str = None) -> str:
     meta = dict(payload.get("metadata") or {})
     if isinstance(payload.get("verdict"), dict):
         meta["verdict"] = payload["verdict"]                       # verdict d'origine (critères / référence éventuels)
+    if isinstance(payload.get("diagnostic_alerts"), list):
+        meta["diagnostic_alerts"] = payload["diagnostic_alerts"]   # alertes d'origine (y compris suppressions éventuelles)
     if isinstance(payload.get("inventory_campaign"), dict):
         meta["inventory_diff"] = payload["inventory_campaign"]
     snapshot = (payload.get("system") or {}).get("snapshot_at_start") or {}
     out_dir = os.path.dirname(os.path.abspath(dst_html or src_html))
     path = export_html(results, out_dir, meta, snapshot)           # nom horodaté, renommé ci-dessous
     target = dst_html or (os.path.splitext(os.path.abspath(src_html))[0] + "_optimise.html")
-    # en-tête du tableau de bord (verdict, alertes matérielles, synthèse thermique) : repris tel quel du rapport d'origine, car les alertes
-    # dépendent de la machine d'export (lecture sysfs en direct) et ne doivent pas être recalculées sur une autre machine
-    marker_start, marker_end = '<section id="overview" class="view active">', '<div class="stat-grid">'
-    with open(path, encoding="utf-8") as f:
-        new_html = f.read()
-    os_, oe_ = raw.find(marker_start), raw.find(marker_end, raw.find(marker_start))
-    ns_, ne_ = new_html.find(marker_start), new_html.find(marker_end, new_html.find(marker_start))
-    if min(os_, oe_, ns_, ne_) >= 0:
-        new_html = new_html[:ns_] + raw[os_:oe_] + new_html[ne_:]
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(new_html)
+    # Pour les anciens rapports sans diagnostic_alerts dans le payload : reprendre l'en-tête du tableau de bord tel quel,
+    # car l'audit matériel d'origine dépendait de la machine d'export (lecture sysfs en direct).
+    if "diagnostic_alerts" not in payload:
+        marker_start, marker_end = '<section id="overview" class="view active">', '<div class="stat-grid">'
+        with open(path, encoding="utf-8") as f:
+            new_html = f.read()
+        os_, oe_ = raw.find(marker_start), raw.find(marker_end, raw.find(marker_start))
+        ns_, ne_ = new_html.find(marker_start), new_html.find(marker_end, new_html.find(marker_start))
+        if min(os_, oe_, ns_, ne_) >= 0:
+            new_html = new_html[:ns_] + raw[os_:oe_] + new_html[ne_:]
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new_html)
     os.replace(path, target)
     return target
 
@@ -379,7 +428,15 @@ def export_html(results: List[BenchmarkResult], out_dir: str, report_meta: dict 
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"benchsuite_report_{_ts()}.html")
     payload = _report_payload(results, report_meta, system_info_data)
+
+    # Audit matériel et alertes dédupliquées (ou reprises telles quelles si fournies par un ré-export)
+    if isinstance((report_meta or {}).get("diagnostic_alerts"), list):
+        alerts = list(report_meta["diagnostic_alerts"])
+    else:
+        alerts = _collect_report_alerts(results, system_info_data, report_meta)
+
     html_payload = json.loads(json.dumps(payload, ensure_ascii=False))
+    html_payload["diagnostic_alerts"] = alerts
     _slim_html_payload(html_payload)        # séries réduites + arrondies pour l'affichage (le JSON exporté reste complet)
     for item in html_payload.get("results", []):
         item.pop("score", None)
@@ -389,15 +446,6 @@ def export_html(results: List[BenchmarkResult], out_dir: str, report_meta: dict 
             el.pop("series", None)   # courbes fournies à part (elecData) pour l'onglet Électronique
     data_json = json.dumps(html_payload, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
 
-    # Audit matériel pour affichage dans le rapport HTML
-    from core.system_info import run_hardware_audit
-    alerts = []
-    if system_info_data:
-        try:
-            alerts = run_hardware_audit(system_info_data)
-        except Exception:
-            pass
-    alerts = list(alerts) + _hardware_fault_alerts(results) + _observation_alerts(results, report_meta) + _pcie_alerts(results)
     if _seq_elec_enabled():
         electronics_html = _sequence_html(payload.get("sequence_series")) + _electronics_html(results, report_meta)
         elec_json = json.dumps(_electronics_chart_data(results, report_meta), ensure_ascii=False).replace("</", "<\\/")
@@ -405,8 +453,8 @@ def export_html(results: List[BenchmarkResult], out_dir: str, report_meta: dict 
         electronics_html, elec_json = "", "[]"      # onglet retiré du rapport (voir EXPORT_SEQUENCE_ELECTRONICS)
 
     failed_count = sum(1 for r in results if r.status in ("failed", "error"))
-    has_error = any(a["type"] == "error" for a in alerts) if alerts else False
-    has_warning = any(a["type"] == "warning" for a in alerts) if alerts else False
+    has_error = any(a.get("type") == "error" for a in alerts) if alerts else False
+    has_warning = any(a.get("type") == "warning" for a in alerts) if alerts else False
 
 
     tel_gpus = (payload.get("telemetry_summary") or {}).get("gpus", [])
@@ -461,6 +509,7 @@ def export_html(results: List[BenchmarkResult], out_dir: str, report_meta: dict 
         )
 
 
+    thermal_slot = f'<div id="thermalCardSlot">{thermal_card}</div>' if thermal_card else '<div id="thermalCardSlot"></div>'
     diagnostic_html = ""
     if alerts:
         if has_error:
@@ -477,42 +526,56 @@ def export_html(results: List[BenchmarkResult], out_dir: str, report_meta: dict 
             title_color = "#93c5fd"
 
         items_html = ""
-        for a in alerts:
+        for a_idx, a in enumerate(alerts):
             atype = a.get("type", "warning")
             if atype == "error":
-                prefix = "•"
                 lbl_color = "#fca5a5"
             elif atype == "warning":
-                prefix = "•"
                 lbl_color = "#fef08a"
             else:
-                prefix = "•"
                 lbl_color = "#93c5fd"
-            
+
             items_html += (
-                f'<div style="margin-top: 12px; margin-left: 12px;">'
-                f'<strong style="color: {lbl_color};">{prefix} {_html.escape(str(a["category"]))}</strong> — <strong>{_html.escape(str(a["title"]))}</strong>'
+                f'<div class="diag-alert-item" data-alert-idx="{a_idx}">'
+                f'<div class="diag-alert-body">'
+                f'<strong style="color: {lbl_color};">• {_html.escape(str(a["category"]))}</strong> — <strong>{_html.escape(str(a["title"]))}</strong>'
                 f'<p style="color: #cbd5e1; font-size: 13px; margin-top: 4px; line-height: 1.4;">{_html.escape(str(a["desc"]))}</p>'
                 + (f'<p style="color: #94a3b8; font-size: 12px; margin-top: 2px;">Concernés : {_html.escape(" ; ".join(a["devices"]))}</p>' if a.get("devices") else "")
-                + f'</div>'
+                + '</div>'
+                f'<button type="button" class="alert-del-btn no-print" title="Supprimer cette alerte" '
+                f'onclick="dismissDiagAlert({a_idx})">✕</button>'
+                f'</div>'
             )
 
+        clear_btn = (
+            '<button type="button" class="verdict-btn no-print" id="btnDismissAllDiag" '
+            'onclick="dismissAllDiagAlerts()" title="Supprimer toutes les alertes matérielles">✕ Tout supprimer</button>'
+        )
         diagnostic_html = (
-            f'<div style="{box_style}">'
-            f'<h3 style="color: {title_color}; font-size: 16px; font-weight: 700; margin-bottom: 8px;">{title_text}</h3>'
+            f'<div id="diagnosticBox" style="{box_style}">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">'
+            f'<h3 id="diagTitle" style="color: {title_color}; font-size: 16px; font-weight: 700; margin: 0;">{title_text}</h3>'
+            f'<div class="verdict-actions no-print" id="diagActions">{clear_btn}'
+            f'<button type="button" class="verdict-btn no-print" id="btnResetDiagOnly" onclick="resetVerdictAndAlerts()" style="display:none">↺ Rétablir les alertes</button>'
+            f'</div></div>'
             f'<hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 8px 0;"/>'
-            f'{items_html}'
-            f'{thermal_card}'
+            f'<div id="diagAlertsList">{items_html}</div>'
+            f'{thermal_slot}'
             f'</div>'
         )
     else:
         box_style = "background-color: #112615; border: 1px solid #10b981; border-radius: 12px; padding: 18px 20px; margin-bottom: 24px;"
         diagnostic_html = (
-            f'<div style="{box_style}">'
-            f'<h3 style="color: #a7f3d0; font-size: 16px; font-weight: 700; margin-bottom: 8px;">Diagnostic Matériel : Système entièrement opérationnel</h3>'
+            f'<div id="diagnosticBox" style="{box_style}">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px;">'
+            f'<h3 id="diagTitle" style="color: #a7f3d0; font-size: 16px; font-weight: 700; margin: 0;">Diagnostic Matériel : Système entièrement opérationnel</h3>'
+            f'<div class="verdict-actions no-print" id="diagActions">'
+            f'<button type="button" class="verdict-btn no-print" id="btnDismissAllDiag" onclick="dismissAllDiagAlerts()" style="display:none">✕ Tout supprimer</button>'
+            f'<button type="button" class="verdict-btn no-print" id="btnResetDiagOnly" onclick="resetVerdictAndAlerts()" style="display:none">↺ Rétablir les alertes</button>'
+            f'</div></div>'
             f'<hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 8px 0;"/>'
-            f'<p style="color: #cbd5e1; font-size: 13px; line-height: 1.4;">Toutes les barrettes de RAM détectées sont homogènes et tous les périphériques PCIe clés (cartes graphiques, stockage, interfaces réseau) fonctionnent dans leur configuration et bande passante maximales théoriques.</p>'
-            f'{thermal_card}'
+            f'<div id="diagAlertsList"><p style="color: #cbd5e1; font-size: 13px; line-height: 1.4;">Toutes les barrettes de RAM détectées sont homogènes et tous les périphériques PCIe clés (cartes graphiques, stockage, interfaces réseau) fonctionnent dans leur configuration et bande passante maximales théoriques.</p></div>'
+            f'{thermal_slot}'
             f'</div>'
         )
 
@@ -1045,9 +1108,23 @@ def export_html(results: List[BenchmarkResult], out_dir: str, report_meta: dict 
 .cmd-inline{font-family:'Fira Code',monospace;font-size:11px;background:#090d16;color:#38bdf8;padding:3px 7px;border-radius:5px;border:1px solid #1e293b;display:inline-block;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;}
 .cmd-copy-btn{flex-shrink:0;font-size:12px;padding:5px 10px;}
 .card-header,.table-header-flex{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:10px}.card-header h2,.table-header-flex h4{margin:0}.table-actions{display:flex;gap:8px}.action-btn{background:#0b1220;color:var(--text-main);border:1px solid var(--border-color);border-radius:6px;padding:5px 10px;font-size:11px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:4px;transition:all .15s ease}.action-btn:hover{border-color:var(--accent);background:rgba(255,102,0,0.1)}.action-btn.success{background:rgba(76,175,80,0.15);border-color:var(--ok);color:#81c784}.action-btn.loading{background:rgba(255,153,102,0.15);border-color:var(--warn);color:#ffb74d}
+.verdict-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center;justify-content:flex-end}
+.verdict-btn{background:rgba(11,18,32,0.75);color:var(--text-main);border:1px solid var(--border-color);border-radius:7px;padding:5px 10px;font:inherit;font-size:12px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:all .15s ease}
+.verdict-btn:hover{border-color:var(--accent);background:rgba(255,102,0,0.12)}
+.verdict-btn-ok{border-color:#a6e3a1;color:#a6e3a1;background:rgba(166,227,161,0.12)}
+.verdict-btn-ok:hover{border-color:#a6e3a1;background:rgba(166,227,161,0.24)}
+.verdict-rule-row{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin:4px 0;padding:4px 8px;border-radius:7px;background:rgba(0,0,0,0.14)}
+.diag-alert-item{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-top:10px;padding:8px 10px;border-radius:8px;background:rgba(0,0,0,0.14)}
+.diag-alert-body{flex:1;min-width:0}
+.alert-del-btn{flex-shrink:0;background:transparent;color:#94a3b8;border:1px solid rgba(148,163,184,0.28);border-radius:6px;padding:2px 7px;font-size:12px;font-weight:700;cursor:pointer;line-height:1.3;transition:all .15s ease}
+.alert-del-btn:hover{color:#f38ba8;border-color:#f38ba8;background:rgba(243,139,168,0.15)}
+.manual-form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;padding:10px 12px;border-radius:9px;background:rgba(0,0,0,0.22);border:1px solid rgba(166,227,161,0.35)}
+.manual-form input{flex:1;min-width:220px;padding:7px 10px;font-size:13px}
+.verdict-manual-note{font-size:12px;color:#a6e3a1;margin-top:4px;font-weight:600}
+@media print{.no-print,.alert-del-btn,.verdict-actions,.top-actions,.table-actions,.cmd-copy-btn,.manual-form{display:none!important}}
 </style></head><body>
 <script type="application/json" id="payload">%%PAYLOAD%%</script>
-<header><div class="topbar"><div><h1>BenchSuite — Rapport de validation</h1><p class="subtitle">Système testé : <b>%%SYSTEM%%</b> %%META_INFO%%· Export : %%EXPORTED%% · Version : %%VERSION%%</p><div class="top-actions"><button class="note-btn" id="downloadEditedHtml" type="button">Télécharger HTML avec notes</button><button class="note-btn" id="themeBtn" type="button" onclick="cycleTheme()" title="Thème : sombre → clair → automatique (suit le système), mémorisé dans ce navigateur">🌙 Sombre</button></div></div></div><div class="tabs" id="mainTabs"><button class="tab active" data-view="overview">Tableau de bord</button><button class="tab" data-view="cpu">CPU + RAM</button><button class="tab" data-view="storage">Stockage</button><button class="tab" data-view="gpu">GPU</button><button class="tab" data-view="network">Réseau</button><button class="tab" data-view="nvbandwidth" id="nvbandwidthTab" style="display:none">NVIDIA nvbandwidth</button><button class="tab" data-view="charts">Graphique</button><button class="tab" data-view="electronics">Séquence &amp; électronique</button><button class="tab" data-view="system">Système</button><button class="tab" data-view="benches">Résultats détaillés</button><button class="tab" data-view="compare">Comparaison HTML</button><button class="tab" data-view="json">JSON brut</button></div></header>
+<header><div class="topbar"><div><h1>BenchSuite — Rapport de validation</h1><p class="subtitle">Système testé : <b>%%SYSTEM%%</b> %%META_INFO%%· Export : %%EXPORTED%% · Version : %%VERSION%%</p><div class="top-actions"><button class="note-btn" id="downloadEditedHtml" type="button" title="Enregistre ce rapport HTML en conservant vos notes, alertes supprimées et validation manuelle">💾 Enregistrer HTML modifié</button><button class="note-btn" id="themeBtn" type="button" onclick="cycleTheme()" title="Thème : sombre → clair → automatique (suit le système), mémorisé dans ce navigateur">🌙 Sombre</button></div></div></div><div class="tabs" id="mainTabs"><button class="tab active" data-view="overview">Tableau de bord</button><button class="tab" data-view="cpu">CPU + RAM</button><button class="tab" data-view="storage">Stockage</button><button class="tab" data-view="gpu">GPU</button><button class="tab" data-view="network">Réseau</button><button class="tab" data-view="nvbandwidth" id="nvbandwidthTab" style="display:none">NVIDIA nvbandwidth</button><button class="tab" data-view="charts">Graphique</button><button class="tab" data-view="electronics">Séquence &amp; électronique</button><button class="tab" data-view="system">Système</button><button class="tab" data-view="benches">Résultats détaillés</button><button class="tab" data-view="compare">Comparaison HTML</button><button class="tab" data-view="json">JSON brut</button></div></header>
 <main><section id="overview" class="view active">%%DIAGNOSTIC_BOX%%<div class="stat-grid"><div class="stat-card"><div class="stat-label"><span class="stat-dot" style="color:#3b82f6;background:#3b82f6"></span>Benchmarks</div><div class="stat-val">%%COUNT%%</div><div class="stat-range"><span>Total</span><span>rapport</span></div></div><div class="stat-card"><div class="stat-label"><span class="stat-dot" style="color:#10b981;background:#10b981"></span>OK</div><div class="stat-val">%%OK%%</div><div class="stat-range"><span>Validés</span><span>sans erreur</span></div></div><div class="stat-card"><div class="stat-label"><span class="stat-dot" style="color:#ef4444;background:#ef4444"></span>Échecs</div><div class="stat-val">%%FAILED%%</div><div class="stat-range"><span>À vérifier</span><span>logs inclus</span></div></div>%%STOP_CARD%%<div class="stat-card"><div class="stat-label"><span class="stat-dot" style="color:#a855f7;background:#a855f7"></span>Système</div><div class="stat-val" style="font-size:18px">%%SYSTEM%%</div><div class="stat-range"><span>snapshot</span><span>départ</span></div></div></div><div class="card"><h2>Tests couverts</h2><p class="muted">%%COVERED%%Les graphiques utilisent les séries temporelles quand elles existent, sinon les métriques numériques du test.</p><div class="stat-grid" style="margin-top:16px;margin-bottom:0">%%CATEGORY_CARDS%%</div></div></section>
 <section id="cpu" class="view"><div class="card"><div class="card-header"><h2>Résultats CPU + RAM</h2><div class="table-actions" data-html2canvas-ignore="true"><button class="action-btn" onclick="copyTableToImage(this, this.closest('.card').querySelector('table'))">📸 Image</button><button class="action-btn" onclick="copyTableToExcel(this, this.closest('.card').querySelector('table'))">📋 Excel</button></div></div><table><thead><tr><th>#</th><th>Test</th><th>Statut</th><th>Durée</th><th>Paramètres</th><th>Métriques clés</th></tr></thead><tbody>%%CPU_ROWS%%</tbody></table></div></section>
 <section id="storage" class="view"><div class="card"><div class="card-header"><h2>Résultats Stockage (fio / dd)</h2><div class="table-actions" data-html2canvas-ignore="true"><button class="action-btn" onclick="copyTableToImage(this, this.closest('.card').querySelector('table'))">📸 Image</button><button class="action-btn" onclick="copyTableToExcel(this, this.closest('.card').querySelector('table'))">📋 Excel</button></div></div><table><thead><tr><th>#</th><th>Test</th><th>Statut</th><th>Durée</th><th>Paramètres</th><th>Métriques clés</th></tr></thead><tbody>%%STORAGE_ROWS%%</tbody></table></div></section>
@@ -1152,11 +1229,261 @@ function copyTableToExcel(btn,table){
 }
 let payload={};try{payload=JSON.parse(document.getElementById('payload').textContent)}catch(e){document.body.insertAdjacentHTML('afterbegin','<pre style="background:#450a0a;color:#fecaca;padding:12px">Erreur JSON rapport: '+String(e)+'</pre>')}
 const NOTE_STORAGE_KEY='benchsuite-notes:'+((payload.exported_at||'')+'|'+((payload.system&&payload.system.name)||'')+'|'+((payload.results||[]).map(r=>(r.name||'')+':'+(r.timestamp||'')).join('|'))).replace(/\s+/g,' ');
+const VERDICT_STORAGE_KEY='benchsuite-verdict-edits:'+((payload.exported_at||'')+'|'+(payload.verdict_edit_ts||'')+'|'+((payload.system&&payload.system.name)||'')+'|'+((payload.results||[]).map(r=>(r.name||'')+':'+(r.timestamp||'')).join('|'))).replace(/\s+/g,' ');
+const INITIAL_VERDICT=payload.verdict?JSON.parse(JSON.stringify(payload.verdict)):null;
+const INITIAL_DIAG_ALERTS=Array.isArray(payload.diagnostic_alerts)?JSON.parse(JSON.stringify(payload.diagnostic_alerts)):[];
+const VERDICT_STYLES={CONFORME:['#a6e3a1','rgba(166,227,161,0.12)'],A_VERIFIER:['#f9e2af','rgba(249,226,175,0.12)'],NON_CONFORME:['#f38ba8','rgba(243,139,168,0.14)'],NON_EVALUE:['#94a3b8','rgba(148,163,184,0.12)']};
+const VERDICT_LABELS={CONFORME:'CONFORME',A_VERIFIER:'À VÉRIFIER',NON_CONFORME:'NON CONFORME',NON_EVALUE:'NON ÉVALUÉ'};
+const RULE_SYM={fail:'✗',warn:'⚠',pass:'✓',na:'·'};
+const RULE_COL={fail:'#f38ba8',warn:'#f9e2af',pass:'#a6e3a1',na:'#94a3b8'};
 function updateJsonDump(){const el=document.getElementById('jsonDump');if(el)el.textContent=JSON.stringify(payload,(k,v)=>(Array.isArray(v)&&v.length>40&&typeof v[0]==='number')?'['+v.length+' valeurs numériques]':v,2)}
+function hasVerdictEdits(){return JSON.stringify(payload.verdict||null)!==JSON.stringify(INITIAL_VERDICT)}
+function hasDiagEdits(){return JSON.stringify(payload.diagnostic_alerts||[])!==JSON.stringify(INITIAL_DIAG_ALERTS)}
+function hasAnyVerdictOrAlertEdits(){return hasVerdictEdits()||hasDiagEdits()}
+function saveVerdictEdits(){try{localStorage.setItem(VERDICT_STORAGE_KEY,JSON.stringify({verdict:payload.verdict||null,diagnostic_alerts:payload.diagnostic_alerts||[]}))}catch(e){}}
+function recomputeVerdict(v){
+  if(!v)return;
+  const rules=Array.isArray(v.rules)?v.rules:[];
+  const counts={pass:0,warn:0,fail:0,na:0};
+  rules.forEach(r=>{const lv=r&&r.level;if(Object.prototype.hasOwnProperty.call(counts,lv))counts[lv]++});
+  v.counts=counts;
+  let autoStatus='NON_EVALUE';
+  if(counts.fail>0)autoStatus='NON_CONFORME';
+  else if(counts.warn>0)autoStatus='A_VERIFIER';
+  else if(counts.pass>0||(Array.isArray(v.dismissed_rules)&&v.dismissed_rules.length>0))autoStatus='CONFORME';
+  v.auto_status=autoStatus;
+  if(v.manual_override&&v.manual_override.status==='CONFORME'){
+    v.status='CONFORME';
+    v.label='CONFORME (validé manuellement)';
+  }else{
+    v.status=autoStatus;
+    v.label=VERDICT_LABELS[autoStatus]||autoStatus;
+  }
+}
+function applyBoxStyleAndTheme(el,styleStr){
+  if(!el)return;
+  el.removeAttribute('data-os');
+  el.setAttribute('style',styleStr);
+  if(typeof themeIsLight==='function'&&themeIsLight(window.__theme)){fixInline(el,true)}
+}
+function renderVerdictBox(){
+  const box=document.getElementById('verdictBox');
+  const v=payload.verdict;
+  if(!box||!v)return;
+  const pair=VERDICT_STYLES[v.status]||VERDICT_STYLES.NON_EVALUE;
+  const col=pair[0],bg=pair[1];
+  applyBoxStyleAndTheme(box,'background:'+bg+';border:1px solid '+col+';border-radius:12px;padding:16px 20px;margin-bottom:20px');
+  const titleEl=document.getElementById('verdictTitle');
+  if(titleEl){
+    titleEl.textContent='VERDICT : '+(v.label||v.status||'');
+    applyBoxStyleAndTheme(titleEl,'font-size:22px;font-weight:800;color:'+col);
+  }
+  const mo=v.manual_override&&typeof v.manual_override==='object'?v.manual_override:null;
+  const noteEl=document.getElementById('verdictManualNote');
+  if(noteEl){
+    if(mo){
+      const reason=String(mo.reason||'').trim();
+      noteEl.textContent='✓ Validé manuellement en CONFORME'+(reason?' — Motif : '+reason:'');
+      noteEl.style.display='block';
+    }else{
+      noteEl.textContent='';
+      noteEl.style.display='none';
+    }
+  }
+  const c=v.counts||{};
+  const metaEl=document.getElementById('verdictMeta');
+  if(metaEl){
+    metaEl.innerHTML=(c.pass||0)+' conforme(s) · '+(c.warn||0)+' à vérifier · '+(c.fail||0)+' non conforme(s) · '+(c.na||0)+' non évalué(s)<br>Sources : '+escapeHtml((v.sources||[]).join(', '));
+  }
+  const btnForce=document.getElementById('btnForceConforme');
+  const btnCancel=document.getElementById('btnCancelConforme');
+  const btnReset=document.getElementById('btnResetEdits');
+  if(btnForce)btnForce.style.display=(v.status!=='CONFORME'&&!mo)?'inline-flex':'none';
+  if(btnCancel)btnCancel.style.display=mo?'inline-flex':'none';
+  if(btnReset)btnReset.style.display=(hasAnyVerdictOrAlertEdits()||!!mo||(Array.isArray(v.dismissed_rules)&&v.dismissed_rules.length>0))?'inline-flex':'none';
+  const rules=Array.isArray(v.rules)?v.rules:[];
+  const mainEl=document.getElementById('verdictRulesMain');
+  if(mainEl){
+    let mainHtml='';
+    rules.forEach((r,idx)=>{
+      if(r&&(r.level==='fail'||r.level==='warn')){
+        const det=r.detail?' <span style="color:#94a3b8">— '+escapeHtml(r.detail)+'</span>':'';
+        mainHtml+='<div class="verdict-rule-row" data-rule-idx="'+idx+'">'
+          +'<span style="color:'+(RULE_COL[r.level]||'#94a3b8')+'">'+(RULE_SYM[r.level]||'·')+' '
+          +'<span style="color:#e2e8f0">'+escapeHtml(r.label||'')+'</span>'+det+'</span>'
+          +'<button type="button" class="alert-del-btn no-print" title="Supprimer cette alerte du verdict" onclick="dismissVerdictRule('+idx+')">✕</button></div>';
+      }
+    });
+    mainEl.innerHTML=mainHtml;
+    mainEl.style.display=mainHtml?'block':'none';
+    if(mainHtml&&typeof themeIsLight==='function'&&themeIsLight(window.__theme)){fixInline(mainEl,true)}
+  }
+  const restEl=document.getElementById('verdictRulesRest');
+  if(restEl){
+    let restHtml='';
+    let restCount=0;
+    rules.forEach(r=>{
+      if(r&&(r.level==='pass'||r.level==='na')){
+        restCount++;
+        const det=r.detail?' <span style="color:#94a3b8">— '+escapeHtml(r.detail)+'</span>':'';
+        restHtml+='<div style="margin:3px 0;color:'+(RULE_COL[r.level]||'#94a3b8')+'">'+(RULE_SYM[r.level]||'·')+' '
+          +'<span style="color:#e2e8f0">'+escapeHtml(r.label||'')+'</span>'+det+'</div>';
+      }
+    });
+    restEl.innerHTML=restHtml?'<details style="margin-top:8px"><summary style="color:#94a3b8;cursor:pointer">Détail des contrôles réussis / non évalués ('+restCount+')</summary><div style="margin-top:6px;font-size:12px">'+restHtml+'</div></details>':'';
+    if(restHtml&&typeof themeIsLight==='function'&&themeIsLight(window.__theme)){fixInline(restEl,true)}
+  }
+  updateJsonDump();
+}
+function renderDiagBox(){
+  const box=document.getElementById('diagnosticBox');
+  if(!box)return;
+  const alerts=Array.isArray(payload.diagnostic_alerts)?payload.diagnostic_alerts:[];
+  const hasError=alerts.some(a=>a&&a.type==='error');
+  const hasWarning=alerts.some(a=>a&&a.type==='warning');
+  let boxStyle,titleText,titleColor;
+  if(alerts.length>0){
+    if(hasError){
+      boxStyle='background-color: #2d191e; border: 1px solid #ef4444; border-radius: 12px; padding: 18px 20px; margin-bottom: 24px;';
+      titleText='ALERTE : Anomalies critiques détectées dans la configuration matérielle !';
+      titleColor='#fca5a5';
+    }else if(hasWarning){
+      boxStyle='background-color: #2b2210; border: 1px solid #f59e0b; border-radius: 12px; padding: 18px 20px; margin-bottom: 24px;';
+      titleText='ATTENTION : Quelques points matériels à vérifier sur le système';
+      titleColor='#fef08a';
+    }else{
+      boxStyle='background-color: #112233; border: 1px solid #3b82f6; border-radius: 12px; padding: 18px 20px; margin-bottom: 24px;';
+      titleText="INFORMATION : Recommandations d'optimisation système";
+      titleColor='#93c5fd';
+    }
+  }else{
+    boxStyle='background-color: #112615; border: 1px solid #10b981; border-radius: 12px; padding: 18px 20px; margin-bottom: 24px;';
+    titleText='Diagnostic Matériel : Système entièrement opérationnel';
+    titleColor='#a7f3d0';
+  }
+  applyBoxStyleAndTheme(box,boxStyle);
+  const titleEl=document.getElementById('diagTitle');
+  if(titleEl){
+    titleEl.textContent=titleText;
+    applyBoxStyleAndTheme(titleEl,'color: '+titleColor+'; font-size: 16px; font-weight: 700; margin: 0;');
+  }
+  const listEl=document.getElementById('diagAlertsList');
+  if(listEl){
+    if(alerts.length>0){
+      let html='';
+      alerts.forEach((a,idx)=>{
+        const t=(a&&a.type)||'warning';
+        const lblColor=t==='error'?'#fca5a5':(t==='warning'?'#fef08a':'#93c5fd');
+        const devs=Array.isArray(a&&a.devices)&&a.devices.length?'<p style="color: #94a3b8; font-size: 12px; margin-top: 2px;">Concernés : '+escapeHtml(a.devices.join(' ; '))+'</p>':'';
+        html+='<div class="diag-alert-item" data-alert-idx="'+idx+'"><div class="diag-alert-body">'
+          +'<strong style="color: '+lblColor+';">• '+escapeHtml(String((a&&a.category)||''))+'</strong> — <strong>'+escapeHtml(String((a&&a.title)||''))+'</strong>'
+          +'<p style="color: #cbd5e1; font-size: 13px; margin-top: 4px; line-height: 1.4;">'+escapeHtml(String((a&&a.desc)||''))+'</p>'
+          +devs+'</div>'
+          +'<button type="button" class="alert-del-btn no-print" title="Supprimer cette alerte" onclick="dismissDiagAlert('+idx+')">✕</button></div>';
+      });
+      listEl.innerHTML=html;
+    }else{
+      listEl.innerHTML='<p style="color: #cbd5e1; font-size: 13px; line-height: 1.4;">Toutes les barrettes de RAM détectées sont homogènes et tous les périphériques PCIe clés (cartes graphiques, stockage, interfaces réseau) fonctionnent dans leur configuration et bande passante maximales théoriques.</p>';
+    }
+    if(typeof themeIsLight==='function'&&themeIsLight(window.__theme)){fixInline(listEl,true)}
+  }
+  const btnAll=document.getElementById('btnDismissAllDiag');
+  const btnResetDiag=document.getElementById('btnResetDiagOnly');
+  if(btnAll)btnAll.style.display=alerts.length>0?'inline-flex':'none';
+  if(btnResetDiag)btnResetDiag.style.display=hasDiagEdits()?'inline-flex':'none';
+  updateJsonDump();
+}
+function dismissVerdictRule(idx){
+  const v=payload.verdict;
+  if(!v||!Array.isArray(v.rules)||idx<0||idx>=v.rules.length)return;
+  const removed=v.rules.splice(idx,1)[0];
+  if(!Array.isArray(v.dismissed_rules))v.dismissed_rules=[];
+  if(removed)v.dismissed_rules.push(removed);
+  recomputeVerdict(v);
+  saveVerdictEdits();
+  renderVerdictBox();
+}
+function dismissDiagAlert(idx){
+  if(!Array.isArray(payload.diagnostic_alerts)||idx<0||idx>=payload.diagnostic_alerts.length)return;
+  payload.diagnostic_alerts.splice(idx,1);
+  saveVerdictEdits();
+  renderDiagBox();
+  renderVerdictBox();
+}
+function dismissAllDiagAlerts(){
+  if(!Array.isArray(payload.diagnostic_alerts)||payload.diagnostic_alerts.length===0)return;
+  payload.diagnostic_alerts=[];
+  saveVerdictEdits();
+  renderDiagBox();
+  renderVerdictBox();
+}
+function openManualConforme(){
+  const form=document.getElementById('manualConformeForm');
+  const inp=document.getElementById('manualConformeReason');
+  if(!form)return;
+  form.style.display='flex';
+  if(inp){
+    const prev=payload.verdict&&payload.verdict.manual_override&&payload.verdict.manual_override.reason;
+    if(prev)inp.value=prev;
+    inp.focus();
+  }
+}
+function closeManualConforme(){
+  const form=document.getElementById('manualConformeForm');
+  if(form)form.style.display='none';
+}
+function confirmManualConforme(){
+  const v=payload.verdict;
+  if(!v)return;
+  const inp=document.getElementById('manualConformeReason');
+  const reason=inp?inp.value.trim():'';
+  v.manual_override={status:'CONFORME',reason:reason,at:new Date().toISOString()};
+  closeManualConforme();
+  recomputeVerdict(v);
+  saveVerdictEdits();
+  renderVerdictBox();
+}
+function cancelManualConforme(){
+  const v=payload.verdict;
+  if(!v)return;
+  delete v.manual_override;
+  recomputeVerdict(v);
+  saveVerdictEdits();
+  renderVerdictBox();
+}
+function resetVerdictAndAlerts(){
+  payload.verdict=INITIAL_VERDICT?JSON.parse(JSON.stringify(INITIAL_VERDICT)):null;
+  payload.diagnostic_alerts=JSON.parse(JSON.stringify(INITIAL_DIAG_ALERTS));
+  try{localStorage.removeItem(VERDICT_STORAGE_KEY)}catch(e){}
+  closeManualConforme();
+  renderDiagBox();
+  renderVerdictBox();
+}
+function initVerdictAndAlerts(){
+  const inp=document.getElementById('manualConformeReason');
+  if(inp){
+    inp.addEventListener('keydown',e=>{
+      if(e.key==='Enter'){e.preventDefault();confirmManualConforme()}
+      else if(e.key==='Escape'){e.preventDefault();closeManualConforme()}
+    });
+  }
+  try{
+    const raw=localStorage.getItem(VERDICT_STORAGE_KEY);
+    if(raw){
+      const saved=JSON.parse(raw);
+      if(saved&&typeof saved==='object'){
+        if(saved.verdict&&payload.verdict)payload.verdict=saved.verdict;
+        if(Array.isArray(saved.diagnostic_alerts))payload.diagnostic_alerts=saved.diagnostic_alerts;
+        renderDiagBox();
+        renderVerdictBox();
+      }
+    }
+  }catch(e){}
+}
 function currentNoteMap(){const out={};document.querySelectorAll('[data-note-index]').forEach(el=>{out[el.dataset.noteIndex]=el.innerText.trim()});return out}
 function applyNoteMap(notes){document.querySelectorAll('[data-note-index]').forEach(el=>{const i=+el.dataset.noteIndex;if(notes&&Object.prototype.hasOwnProperty.call(notes,i))el.innerText=notes[i]||'';if(payload.results&&payload.results[i])payload.results[i].notes=el.innerText.trim()})}
 function bindNoteEditors(){let stored={};try{stored=JSON.parse(localStorage.getItem(NOTE_STORAGE_KEY)||'{}')}catch(e){stored={}};applyNoteMap(stored);document.querySelectorAll('[data-note-index]').forEach(el=>{el.addEventListener('input',()=>{const i=+el.dataset.noteIndex;if(payload.results&&payload.results[i])payload.results[i].notes=el.innerText.trim();localStorage.setItem(NOTE_STORAGE_KEY,JSON.stringify(currentNoteMap()));updateJsonDump()})});updateJsonDump()}
-function downloadHtmlWithNotes(){applyNoteMap(currentNoteMap());const doc=document.documentElement.cloneNode(true),payloadEl=doc.querySelector('#payload');if(payloadEl)payloadEl.textContent=JSON.stringify(payload).replace(/<\//g,'<\\/');doc.querySelectorAll('[data-os]').forEach(el=>{el.setAttribute('style',el.dataset.os);el.removeAttribute('data-os')});doc.querySelectorAll('[data-note-index]').forEach(el=>{const i=+el.dataset.noteIndex;el.innerText=(payload.results&&payload.results[i]&&payload.results[i].notes)||''});const blob=new Blob(['<!DOCTYPE html>\n'+doc.outerHTML],{type:'text/html;charset=utf-8'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='benchsuite_report_notes.html';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},0)}
+function downloadHtmlWithNotes(){applyNoteMap(currentNoteMap());const exportPayload=JSON.parse(JSON.stringify(payload));if(hasAnyVerdictOrAlertEdits())exportPayload.verdict_edit_ts=Date.now();const doc=document.documentElement.cloneNode(true),payloadEl=doc.querySelector('#payload');if(payloadEl)payloadEl.textContent=JSON.stringify(exportPayload).replace(/<\//g,'<\\/');const mf=doc.querySelector('#manualConformeForm');if(mf)mf.style.display='none';doc.querySelectorAll('[data-os]').forEach(el=>{el.setAttribute('style',el.dataset.os);el.removeAttribute('data-os')});doc.querySelectorAll('[data-note-index]').forEach(el=>{const i=+el.dataset.noteIndex;el.innerText=(exportPayload.results&&exportPayload.results[i]&&exportPayload.results[i].notes)||''});const blob=new Blob(['<!DOCTYPE html>\n'+doc.outerHTML],{type:'text/html;charset=utf-8'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=hasAnyVerdictOrAlertEdits()?'benchsuite_report_modifie.html':'benchsuite_report_notes.html';document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},0);const btn=document.getElementById('downloadEditedHtml');if(btn){const orig=btn.textContent;btn.textContent='✅ HTML enregistré';setTimeout(()=>{btn.textContent=orig},2000)}}
 document.getElementById('downloadEditedHtml')?.addEventListener('click',downloadHtmlWithNotes);
 const HAS_CHART=typeof Chart!=='undefined';
 const COLORS=['#ff6600','#ff8c00','#ffb366','#4caf50','#2196f3','#a855f7','#f38ba8','#22d3ee','#f59e0b','#e879f9','#60a5fa','#34d399'];
@@ -1629,7 +1956,7 @@ function removeCompareReport(idx){
   }
 }
 
-benchOptions();compareBenchOptions();renderCompareReportControls();bindNoteEditors();buildMainChart();buildCompareChart();renderNvbandwidthTab();
+benchOptions();compareBenchOptions();renderCompareReportControls();bindNoteEditors();initVerdictAndAlerts();buildMainChart();buildCompareChart();renderNvbandwidthTab();
 </script></body></html>"""
 
     meta_html = ""

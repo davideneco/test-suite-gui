@@ -477,8 +477,9 @@ def _build_telemetry_summary(results: List[BenchmarkResult], gpu_list: list = No
 
 
 def _hardware_fault_alerts(results: List[BenchmarkResult]) -> list:
-    """Alertes « panne matérielle » construites à partir de la surveillance en direct des tests."""
-    alerts = []
+    """Alertes « panne matérielle » construites à partir de la surveillance en direct des tests (dédupliquées)."""
+    grouped = {}
+    order = []
     for r in results:
         evs = (r.metrics or {}).get("hardware_events")
         if not isinstance(evs, list) or not evs:
@@ -492,14 +493,42 @@ def _hardware_fault_alerts(results: List[BenchmarkResult]) -> list:
                 cats.setdefault(e.get("category", "Événement matériel"), []).append(e)
             for cat, items in cats.items():
                 first = items[0]
-                alerts.append({
-                    "type": sev,
-                    "category": f"Surveillance matérielle — {r.name}",
-                    "title": f"{cat} ({len(items)} événement{'s' if len(items) > 1 else ''}"
-                             + (", test interrompu" if sev == "error" else "") + ")",
-                    "desc": f"À t+{first.get('t', '?')} s : {first.get('line', '')}",
-                    "devices": sorted({e.get("device", "") for e in items if e.get("device")}),
-                })
+                line = str(first.get("line", "") or "").strip()
+                key = (sev, cat, line.lower())
+                devs = {e.get("device", "") for e in items if e.get("device")}
+                if key not in grouped:
+                    grouped[key] = {
+                        "sev": sev,
+                        "cat": cat,
+                        "count": len(items),
+                        "first_t": first.get("t", "?"),
+                        "line": line,
+                        "devices": set(devs),
+                        "tests": [r.name],
+                    }
+                    order.append(key)
+                else:
+                    g = grouped[key]
+                    g["count"] += len(items)
+                    g["devices"].update(devs)
+                    if r.name not in g["tests"]:
+                        g["tests"].append(r.name)
+    alerts = []
+    for key in order:
+        g = grouped[key]
+        tests = g["tests"]
+        category = (f"Surveillance matérielle — {tests[0]}" if len(tests) == 1
+                    else "Surveillance matérielle")
+        cnt = g["count"]
+        suffix_t = f" (relevé sur {len(tests)} tests)" if len(tests) > 1 else ""
+        alerts.append({
+            "type": g["sev"],
+            "category": category,
+            "title": f"{g['cat']} ({cnt} événement{'s' if cnt > 1 else ''}"
+                     + (", test interrompu" if g["sev"] == "error" else "") + ")",
+            "desc": f"À t+{g['first_t']} s : {g['line']}{suffix_t}",
+            "devices": sorted(g["devices"]),
+        })
     return alerts
 
 def _verdict_for(results, hw, meta: dict):
@@ -778,32 +807,197 @@ def _observations(results, meta: dict = None) -> list:
     return out
 
 
+_ALERT_SEV_RANK = {"error": 3, "warning": 2, "info": 1}
+_PCI_BDF_RE = re.compile(r"\b(?:([0-9a-fA-F]{4,8}):)?([0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F])\b")
+
+
+def _norm_pci_bdf(text: str) -> str:
+    """Normalise une adresse PCI en minuscules sans domaine nul (ex. 0000:01:00.0 → 01:00.0)."""
+    m = _PCI_BDF_RE.search(str(text or ""))
+    if not m:
+        return ""
+    dom, bdf = (m.group(1) or "").lower(), m.group(2).lower()
+    if dom and set(dom) != {"0"}:
+        return f"{dom}:{bdf}"
+    return bdf
+
+
+def _extract_pci_bdfs(alert: dict) -> set:
+    """Extrait l'ensemble des adresses PCI normalisées mentionnées dans une alerte."""
+    parts = [alert.get("title", ""), alert.get("desc", ""), alert.get("device", "")]
+    parts.extend(alert.get("devices") or [])
+    out = set()
+    for p in parts:
+        for m in _PCI_BDF_RE.finditer(str(p or "")):
+            dom, bdf = (m.group(1) or "").lower(), m.group(2).lower()
+            out.add(f"{dom}:{bdf}" if (dom and set(dom) != {"0"}) else bdf)
+    return out
+
+
 def _observation_alerts(results, meta: dict = None) -> list:
-    """Alertes du tableau de bord : rails hors tolérance, dérives d'inventaire, nouveaux événements BMC."""
-    alerts = []
+    """Alertes du tableau de bord : rails hors tolérance, dérives d'inventaire, nouveaux événements BMC (dédupliquées)."""
+    grouped = {}
+    order = []
+
+    def _add(kind: str, sev: str, src_title: str, title: str, desc: str):
+        key = (kind, str(title or "").strip().lower(), str(desc or "").strip().lower())
+        if key not in grouped:
+            grouped[key] = {"kind": kind, "type": sev, "title": str(title or ""), "desc": str(desc or ""), "sources": [src_title]}
+            order.append(key)
+        else:
+            g = grouped[key]
+            if _ALERT_SEV_RANK.get(sev, 0) > _ALERT_SEV_RANK.get(g["type"], 0):
+                g["type"] = sev
+            if src_title and src_title not in g["sources"]:
+                g["sources"].append(src_title)
+
     for title, el, inv, _ in _observations(results, meta):
         for a in ((el or {}).get("alerts", []) if _seq_elec_enabled() else []):
-            alerts.append({"type": "warning", "category": f"Électronique — {title}", "title": "Tension hors tolérance",
-                           "desc": a})
+            _add("Électronique", "warning", title, "Tension hors tolérance", a)
         for f in (inv or {}).get("findings", []):
-            if f["level"] in ("fail", "warn"):
-                alerts.append({"type": "error" if f["level"] == "fail" else "warning",
-                               "category": f"Inventaire avant/après — {title}", "title": f["label"],
-                               "desc": f.get("detail", "")})
+            if f.get("level") in ("fail", "warn"):
+                _add("Inventaire avant/après", "error" if f["level"] == "fail" else "warning",
+                     title, f.get("label", ""), f.get("detail", ""))
+
+    alerts = []
+    for key in order:
+        g = grouped[key]
+        srcs = g["sources"]
+        if len(srcs) == 1 and not srcs[0].startswith("Campagne complète"):
+            cat = f"{g['kind']} — {srcs[0]}"
+        else:
+            cat = g["kind"]
+        alerts.append({"type": g["type"], "category": cat, "title": g["title"], "desc": g["desc"]})
     return alerts
 
 
 def _pcie_alerts(results) -> list:
-    """Alertes du tableau de bord : lien PCIe sous le maximum du périphérique pendant un test (largeur durablement réduite)."""
-    alerts = []
+    """Alertes du tableau de bord : lien PCIe sous le maximum du périphérique pendant un test (dédupliquées par périphérique)."""
+    grouped = {}
+    order = []
     for r in results:
         pl = (r.metrics or {}).get("pcie_links") if isinstance(getattr(r, "metrics", None), dict) else None
         for d in (pl or {}).get("periphériques", []):
+            bus = str(d.get("bus", "") or "")
+            dev_label = f"{d['nom']} ({bus})" if d.get("nom") else (bus or "?")
+            bdf = _norm_pci_bdf(bus) or _norm_pci_bdf(dev_label)
             for f in d.get("anomalies", []):
                 if f.get("level") == "warn":
-                    alerts.append({"type": "warning", "category": f"Liens PCIe — {r.name}",
-                                   "title": "Lien réduit : " + (f"{d['nom']} ({d.get('bus', '')})" if d.get("nom") else d.get("bus", "?")), "desc": f.get("label", "")})
+                    lab = str(f.get("label", "") or "").strip()
+                    key = (bdf or dev_label.lower(), lab.lower())
+                    if key not in grouped:
+                        grouped[key] = {"dev_label": dev_label, "label": lab, "tests": [r.name]}
+                        order.append(key)
+                    else:
+                        if r.name not in grouped[key]["tests"]:
+                            grouped[key]["tests"].append(r.name)
+    alerts = []
+    for key in order:
+        g = grouped[key]
+        tests = g["tests"]
+        desc = g["label"]
+        if len(tests) > 1:
+            desc = f"{desc} (relevé sur {len(tests)} tests)"
+        alerts.append({
+            "type": "warning",
+            "category": "Liens PCIe",
+            "title": "Lien réduit : " + g["dev_label"],
+            "desc": desc,
+        })
     return alerts
+
+
+def _dedupe_alerts(alerts: list) -> list:
+    """Supprime les alertes redondantes entre l'audit matériel initial et les relevés pendant les tests.
+
+    Notamment : si l'audit matériel signale déjà une liaison PCIe réduite pour un périphérique (ex. GPU 01:00.0 en x8
+    au lieu de x16), l'alerte équivalente issue de `_pcie_alerts` pour `0000:01:00.0` n'est pas répétée.
+    """
+    covered_width_bdfs = set()
+    covered_speed_bdfs = set()
+    covered_any_pcie_bdfs = set()
+
+    def _pcie_flags(a: dict):
+        txt = f"{a.get('category', '')} {a.get('title', '')} {a.get('desc', '')}".lower()
+        is_pcie = "pcie" in txt or "liaison" in txt or "lien réduit" in txt or "bus bridé" in txt
+        is_width = "largeur" in txt or "physiquement dégradée" in txt or "au lieu de x" in txt
+        is_speed = "vitesse" in txt or "au lieu de gen" in txt
+        return is_pcie, is_width, is_speed
+
+    # 1. Recenser les bus PCIe déjà couverts par l'audit matériel initial
+    for a in alerts or []:
+        if not isinstance(a, dict):
+            continue
+        cat = str(a.get("category", "") or "")
+        if cat.startswith("Liens PCIe"):
+            continue
+        is_pcie, is_width, is_speed = _pcie_flags(a)
+        if not is_pcie:
+            continue
+        bdfs = _extract_pci_bdfs(a)
+        if not bdfs:
+            continue
+        if is_width:
+            covered_width_bdfs.update(bdfs)
+        if is_speed:
+            covered_speed_bdfs.update(bdfs)
+        if not is_width and not is_speed:
+            covered_any_pcie_bdfs.update(bdfs)
+
+    # 2. Filtrer les doublons PCIe et fusionner toute alerte identique restante
+    grouped = {}
+    order = []
+    for a in alerts or []:
+        if not isinstance(a, dict):
+            continue
+        cat = str(a.get("category", "") or "")
+        if cat.startswith("Liens PCIe"):
+            bdfs = _extract_pci_bdfs(a)
+            if bdfs:
+                _, is_width, is_speed = _pcie_flags(a)
+                if is_width and not is_speed and bdfs.issubset(covered_width_bdfs | covered_any_pcie_bdfs):
+                    continue
+                if is_speed and not is_width and bdfs.issubset(covered_speed_bdfs | covered_any_pcie_bdfs):
+                    continue
+                if is_width and is_speed and bdfs.issubset((covered_width_bdfs & covered_speed_bdfs) | covered_any_pcie_bdfs):
+                    continue
+                if not is_width and not is_speed and bdfs.issubset(covered_width_bdfs | covered_speed_bdfs | covered_any_pcie_bdfs):
+                    continue
+
+        cat_base = cat.split(" — ", 1)[0].strip().lower()
+        title_k = str(a.get("title", "") or "").strip().lower()
+        desc_k = str(a.get("desc", "") or "").strip().lower()
+        key = (cat_base, title_k, desc_k)
+        if key not in grouped:
+            entry = dict(a)
+            if entry.get("devices"):
+                entry["devices"] = list(dict.fromkeys(entry["devices"]))
+            grouped[key] = entry
+            order.append(key)
+        else:
+            existing = grouped[key]
+            if _ALERT_SEV_RANK.get(a.get("type"), 0) > _ALERT_SEV_RANK.get(existing.get("type"), 0):
+                existing["type"] = a.get("type")
+            if a.get("devices"):
+                devs = list(existing.get("devices") or [])
+                for d in a["devices"]:
+                    if d not in devs:
+                        devs.append(d)
+                existing["devices"] = devs
+    return [grouped[k] for k in order]
+
+
+def _collect_report_alerts(results, system_info_data: dict = None, report_meta: dict = None) -> list:
+    """Agrège et déduplique l'ensemble des alertes matérielles d'un rapport (audit, pannes, observations, liens PCIe)."""
+    alerts = []
+    if system_info_data:
+        try:
+            from core.system_info import run_hardware_audit
+            alerts = list(run_hardware_audit(system_info_data) or [])
+        except Exception:
+            alerts = []
+    alerts = alerts + _hardware_fault_alerts(results) + _observation_alerts(results, report_meta) + _pcie_alerts(results)
+    return _dedupe_alerts(alerts)
 
 
 def _electrical_rows(el: dict) -> list:
