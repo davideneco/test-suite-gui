@@ -182,10 +182,10 @@ class TestAxeleraFunctionalMock(unittest.TestCase):
             os.makedirs(sdk_old)
             with open(os.path.join(sdk_old, "VERSION.TXT"), "w") as f:
                 f.write("1.5.2\n")
-            os.makedirs(os.path.join(sdk_new, "venv", "bin"))
+            os.makedirs(os.path.join(sdk_new, "venv_1.9.0", "bin"))
             with open(os.path.join(sdk_new, "VERSION.TXT"), "w") as f:
                 f.write("1.9.1\n")
-            axdev = os.path.join(sdk_new, "venv", "bin", "axdevice")
+            axdev = os.path.join(sdk_new, "venv_1.9.0", "bin", "axdevice")
             with open(axdev, "w") as f:
                 f.write("#!/bin/sh\necho 'libaxl missing' >&2\nexit 1\n")
             os.chmod(axdev, 0o755)

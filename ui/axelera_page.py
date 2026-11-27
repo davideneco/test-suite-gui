@@ -790,14 +790,17 @@ class AxeleraPage(Gtk.Box):
             else:
                 hint = "Module noyau `metis` non chargé (/sys/class/metis absent)."
             if st.get("dkms_present"):
+                mok = st.get("mok_path") or "/var/lib/shim-signed/mok/MOK.der"
                 if st.get("secure_boot") is True:
-                    mok = "/var/lib/dkms/mok.pub" if st.get("dkms_mok_exists") else "<clé_MOK>"
                     hint += (
                         " Secure Boot UEFI est activé : la signature DKMS risque d'être rejetée (« Key was rejected by service »). "
                         f"Désactivez Secure Boot dans le BIOS/UEFI ou importez `{mok}` via `sudo mokutil --import {mok}` puis redémarrez."
                     )
                 else:
-                    hint += " Essayez : `sudo modprobe metis` (ou `dkms status`)."
+                    hint += (
+                        f" Essayez : `sudo modprobe metis` (`dkms status`) — si « Key was rejected by service », "
+                        f"vérifiez la clé `{mok}` ou recompilez `metis-dkms` pour Linux {krel}."
+                    )
             elif st.get("tools", {}).get("axdevice"):
                 hint += " Installez le pilote : `axdevice driver --install`."
             issues.append(hint)
@@ -1040,14 +1043,12 @@ class AxeleraPage(Gtk.Box):
         st = self._last_status or {}
         if self._devices and (st.get("sdk_dir") or st.get("axsystemserver_installed") or st.get("opt_runtimes")):
             sdk_path = st.get("sdk_dir") or "~/voyager-sdk"
-            sb_block = ""
-            if st.get("secure_boot") is True:
-                mok = "/var/lib/dkms/mok.pub"
-                sb_block = (
-                    "# Secure Boot actif : vérifier / enrôler la clé MOK DKMS (ou désactiver Secure Boot dans le BIOS)\n"
-                    "mokutil --sb-state\n"
-                    f"sudo mokutil --import {mok}  # puis redémarrer et valider Enroll MOK au boot\n"
-                )
+            mok = st.get("mok_path") or "/var/lib/shim-signed/mok/MOK.der"
+            sb_block = (
+                "# Enrôler la clé MOK si `modprobe metis` renvoie « Key was rejected by service »\n"
+                "mokutil --sb-state\n"
+                f"# sudo mokutil --import {mok}  # puis redémarrer (Enroll MOK) ou recompiler metis sans signature\n"
+            )
             cmd = (
                 f"# 1. Vérifier / charger le pilote noyau metis (noyau {st.get('kernel_release') or '$(uname -r)'})\n"
                 "dkms status\n"
@@ -1057,8 +1058,8 @@ class AxeleraPage(Gtk.Box):
                 "# 2. Activer le service de télémétrie\n"
                 "sudo systemctl enable --now axsystemserver\n"
                 "# 3. Vérifier les outils du runtime / SDK\n"
-                f"source {sdk_path}/venv/bin/activate 2>/dev/null || true\n"
-                "which axdevice || ls /opt/axelera/*/bin/axdevice 2>/dev/null\n"
+                f"for v in {sdk_path}/venv*/bin/activate; do [ -f \"$v\" ] && source \"$v\" && break; done\n"
+                "which axdevice || ls /opt/axelera/*/bin/axmonitor 2>/dev/null\n"
                 "axdevice"
             )
             msg = "Commandes de diagnostic / activation pilote copiées dans le presse-papiers"

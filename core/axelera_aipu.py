@@ -112,10 +112,23 @@ def _sdk_version_tuple(sdk_dir: str) -> Tuple[int, ...]:
     return tuple(nums)
 
 
+def _sdk_bin_subdirs(sdk_dir: str) -> List[str]:
+    """Retourne les sous-dossiers `bin` d'un SDK (venv, venv_1.9.0, axelera-env, .venv…)."""
+    cands: List[str] = []
+    for sub in ("venv/bin", "axelera-env/bin", ".venv/bin", "bin", "env/bin"):
+        p = os.path.join(sdk_dir, sub)
+        if os.path.isdir(p) and p not in cands:
+            cands.append(p)
+    for pat in ("venv*/bin", "*venv*/bin", "axelera-env*/bin"):
+        for p in sorted(glob.glob(os.path.join(sdk_dir, pat)), reverse=True):
+            if os.path.isdir(p) and p not in cands:
+                cands.append(p)
+    return cands
+
+
 def _sdk_has_tools(sdk_dir: str) -> bool:
     """Vérifie si un dossier SDK contient un venv avec axdevice ou axrunmodel."""
-    for sub in ("venv/bin", "axelera-env/bin", ".venv/bin", "bin", "env/bin"):
-        bdir = os.path.join(sdk_dir, sub)
+    for bdir in _sdk_bin_subdirs(sdk_dir):
         if os.path.isfile(os.path.join(bdir, "axdevice")) or os.path.isfile(os.path.join(bdir, "axrunmodel")):
             return True
     return False
@@ -237,8 +250,8 @@ def _candidate_bin_dirs() -> List[str]:
             add(os.path.join(v, "bin") if os.path.isdir(os.path.join(v, "bin")) else v)
     sdk = find_sdk_dir()
     if sdk:
-        for sub in ("venv/bin", "axelera-env/bin", ".venv/bin", "bin", "env/bin"):
-            add(os.path.join(sdk, sub))
+        for b in _sdk_bin_subdirs(sdk):
+            add(b)
     for p in (os.environ.get("VIRTUAL_ENV"), os.environ.get("AXELERA_VENV")):
         if p:
             add(os.path.join(p, "bin"))
@@ -246,17 +259,17 @@ def _candidate_bin_dirs() -> List[str]:
         add(os.path.join(rt, "bin"))
         add(os.path.join(rt, "venv", "bin"))
     for other_sdk in _candidate_sdk_dirs():
-        for sub in ("venv/bin", "axelera-env/bin", ".venv/bin", "bin", "env/bin"):
-            add(os.path.join(other_sdk, sub))
+        for b in _sdk_bin_subdirs(other_sdk):
+            add(b)
     for home in _candidate_homes():
         for pat in (
-            "voyager-sdk*/venv/bin",
-            "voyager-sdk*/axelera-env/bin",
-            "axelera-env/bin",
-            "axelera/venv/bin",
+            "voyager-sdk*/venv*/bin",
+            "voyager-sdk*/axelera-env*/bin",
+            "axelera-env*/bin",
+            "axelera/venv*/bin",
             ".local/bin",
         ):
-            for p in sorted(glob.glob(os.path.join(home, pat))):
+            for p in sorted(glob.glob(os.path.join(home, pat)), reverse=True):
                 add(p)
     for sys_bin in ("/usr/local/bin", "/usr/bin"):
         add(sys_bin)
@@ -313,7 +326,7 @@ def sdk_env(extra: Optional[Dict[str, str]] = None, configure_board: Optional[bo
     if sdk:
         pp = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = os.pathsep.join([sdk] + ([pp] if pp else []))
-        for p in (os.path.join(sdk, "lib"), os.path.join(sdk, "venv", "lib")):
+        for p in [os.path.join(sdk, "lib")] + sorted(glob.glob(os.path.join(sdk, "venv*", "lib"))):
             if os.path.isdir(p) and p not in lib_dirs:
                 lib_dirs.append(p)
     for rt in _opt_runtime_dirs():
@@ -388,13 +401,18 @@ def sdk_status() -> Dict:
     inf_py = os.path.join(sdk_dir, "inference.py") if sdk_dir else ""
     if inf_py and not os.path.isfile(inf_py):
         inf_py = ""
+    mok_path = next(
+        (p for p in ("/var/lib/shim-signed/mok/MOK.der", "/var/lib/dkms/mok.pub") if os.path.isfile(p)),
+        "",
+    )
     return {
         "driver_loaded": drv["loaded"],
         "driver_name": drv.get("name", ""),
         "driver_version": drv["version"],
         "dev_nodes": drv["dev_nodes"],
         "dkms_present": drv.get("dkms_present", False),
-        "dkms_mok_exists": os.path.isfile("/var/lib/dkms/mok.pub"),
+        "dkms_mok_exists": bool(mok_path),
+        "mok_path": mok_path,
         "secure_boot": secure_boot_enabled(),
         "kernel_release": os.uname().release,
         "sdk_dir": sdk_dir,

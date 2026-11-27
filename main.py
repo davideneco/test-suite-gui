@@ -29,7 +29,7 @@ from exporters.export import (export_html, export_all, save_to_history, load_his
 
 APP_ID     = "io.benchsuite.app"
 APP_NAME   = "BenchSuite"
-VERSION    = "1.0.26"
+VERSION    = "1.0.27"
 OUTPUT_DIR = os.path.expanduser("~/BenchmarkResults")
 
 _VERSION_DISPLAY: list = []
