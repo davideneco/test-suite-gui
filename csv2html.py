@@ -658,7 +658,7 @@ def export_html_standalone(results: List[BenchmarkResult], outdir: str, meta: di
 
     payload = {
         "results": [r.to_dict() if hasattr(r, "to_dict") else r.__dict__ for r in results],
-        "meta": {"system_name": sys_name, "exported_at": ts_now, "version": "1.0.25", "source": "csv2html"},
+        "meta": {"system_name": sys_name, "exported_at": ts_now, "version": "1.0.26", "source": "csv2html"},
     }
     payload_json = json.dumps(payload, ensure_ascii=False)
 
@@ -908,7 +908,7 @@ pre {{
   <div class="topbar">
     <div>
       <h1>BenchSuite — Rapport d'importation CSV</h1>
-      <p class="subtitle">Système testé : <b>{_html_escape(sys_name)}</b> · Source : <b>csv2html (mode autonome)</b> · Export : {ts_now} · Version : v1.0.25{opt_badge}</p>
+      <p class="subtitle">Système testé : <b>{_html_escape(sys_name)}</b> · Source : <b>csv2html (mode autonome)</b> · Export : {ts_now} · Version : v1.0.26{opt_badge}</p>
     </div>
     <div class="top-actions">
       <button class="note-btn" id="themeBtn" type="button" onclick="cycleTheme()">🌙 Sombre</button>

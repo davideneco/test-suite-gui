@@ -211,6 +211,29 @@ class TestAxeleraFunctionalMock(unittest.TestCase):
                     self.assertFalse(devs[0]["axdevice_ok"])
                     self.assertIn("libaxl missing", st["axdevice_error"])
 
+    def test_opt_runtime_bin_and_ld_library_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rt_old = os.path.join(tmp, "runtime-1.5.2-1")
+            rt_new = os.path.join(tmp, "runtime-1.9.1-1")
+            os.makedirs(os.path.join(rt_old, "bin"))
+            os.makedirs(os.path.join(rt_new, "bin"))
+            os.makedirs(os.path.join(rt_new, "lib"))
+            axdev = os.path.join(rt_new, "bin", "axdevice")
+            with open(axdev, "w") as f:
+                f.write("#!/bin/sh\nexit 0\n")
+            os.chmod(axdev, 0o755)
+
+            with patch("core.axelera_aipu._opt_runtime_dirs", return_value=[rt_new, rt_old]), \
+                 patch("core.axelera_aipu.find_sdk_dir", return_value=""), \
+                 patch("core.axelera_aipu._candidate_sdk_dirs", return_value=[]), \
+                 patch("core.axelera_aipu._candidate_homes", return_value=[]), \
+                 patch("shutil.which", return_value=None):
+                ax.forget_cache()
+                self.assertEqual(ax.find_tool("axdevice"), axdev)
+                env = ax.sdk_env()
+                self.assertIn(os.path.join(rt_new, "bin"), env["PATH"])
+                self.assertIn(os.path.join(rt_new, "lib"), env.get("LD_LIBRARY_PATH", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -207,6 +207,19 @@ def find_sdk_dir() -> str:
     return ""
 
 
+def _opt_runtime_dirs() -> List[str]:
+    """Dossiers `/opt/axelera/runtime-*` ou `/opt/axelera/*` triés du plus récent au plus ancien."""
+    found = []
+    for pat in ("/opt/axelera/runtime-*", "/opt/axelera/sdk/*", "/opt/axelera/*"):
+        for p in glob.glob(pat):
+            if os.path.isdir(p) and os.path.basename(p) not in ("sdk",):
+                ap = os.path.abspath(p)
+                if ap not in found:
+                    found.append(ap)
+    found.sort(key=lambda d: (_sdk_version_tuple(d), d), reverse=True)
+    return found
+
+
 def _candidate_bin_dirs() -> List[str]:
     """Dossiers bin contenant potentiellement `axdevice`, `axrunmodel`, `axmonitor`…"""
     cfg = get_config()
@@ -229,6 +242,9 @@ def _candidate_bin_dirs() -> List[str]:
     for p in (os.environ.get("VIRTUAL_ENV"), os.environ.get("AXELERA_VENV")):
         if p:
             add(os.path.join(p, "bin"))
+    for rt in _opt_runtime_dirs():
+        add(os.path.join(rt, "bin"))
+        add(os.path.join(rt, "venv", "bin"))
     for other_sdk in _candidate_sdk_dirs():
         for sub in ("venv/bin", "axelera-env/bin", ".venv/bin", "bin", "env/bin"):
             add(os.path.join(other_sdk, sub))
@@ -242,9 +258,6 @@ def _candidate_bin_dirs() -> List[str]:
         ):
             for p in sorted(glob.glob(os.path.join(home, pat))):
                 add(p)
-    for pat in ("/opt/axelera/sdk/*/bin", "/opt/axelera/*/venv/bin", "/opt/axelera/*/bin"):
-        for p in sorted(glob.glob(pat)):
-            add(p)
     for sys_bin in ("/usr/local/bin", "/usr/bin"):
         add(sys_bin)
     return dirs
@@ -295,14 +308,21 @@ def sdk_env(extra: Optional[Dict[str, str]] = None, configure_board: Optional[bo
     if bin_dirs:
         cur = env.get("PATH", "")
         env["PATH"] = os.pathsep.join(bin_dirs + ([cur] if cur else []))
+    lib_dirs: List[str] = []
     sdk = find_sdk_dir()
     if sdk:
         pp = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = os.pathsep.join([sdk] + ([pp] if pp else []))
-        lib_dirs = [p for p in (os.path.join(sdk, "lib"), os.path.join(sdk, "venv", "lib")) if os.path.isdir(p)]
-        if lib_dirs:
-            cur_ld = env.get("LD_LIBRARY_PATH", "")
-            env["LD_LIBRARY_PATH"] = os.pathsep.join(lib_dirs + ([cur_ld] if cur_ld else []))
+        for p in (os.path.join(sdk, "lib"), os.path.join(sdk, "venv", "lib")):
+            if os.path.isdir(p) and p not in lib_dirs:
+                lib_dirs.append(p)
+    for rt in _opt_runtime_dirs():
+        for p in (os.path.join(rt, "lib"), os.path.join(rt, "lib", "x86_64-linux-gnu")):
+            if os.path.isdir(p) and p not in lib_dirs:
+                lib_dirs.append(p)
+    if lib_dirs:
+        cur_ld = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(lib_dirs + ([cur_ld] if cur_ld else []))
     if extra:
         env.update(extra)
     return env
@@ -322,6 +342,27 @@ def _run(cmd: List[str], timeout: float = 8.0, cwd: Optional[str] = None,
         return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
     except Exception as exc:
         return -1, "", str(exc)
+
+
+def secure_boot_enabled() -> Optional[bool]:
+    """Retourne True si UEFI Secure Boot est actif, False sinon, None si indéterminé."""
+    for p in glob.glob("/sys/firmware/efi/efivars/SecureBoot-*"):
+        try:
+            with open(p, "rb") as f:
+                data = f.read()
+            if len(data) >= 5:
+                return bool(data[4] == 1)
+        except Exception:
+            pass
+    if shutil.which("mokutil"):
+        rc, out, _ = _run(["mokutil", "--sb-state"], timeout=2, env=os.environ.copy())
+        if rc == 0 and out:
+            low = out.lower()
+            if "enabled" in low:
+                return True
+            if "disabled" in low:
+                return False
+    return None
 
 
 def sdk_status() -> Dict:
@@ -353,16 +394,20 @@ def sdk_status() -> Dict:
         "driver_version": drv["version"],
         "dev_nodes": drv["dev_nodes"],
         "dkms_present": drv.get("dkms_present", False),
+        "dkms_mok_exists": os.path.isfile("/var/lib/dkms/mok.pub"),
+        "secure_boot": secure_boot_enabled(),
         "kernel_release": os.uname().release,
         "sdk_dir": sdk_dir,
         "sdk_version": sdk_ver,
         "detected_sdks": detected_sdks,
+        "opt_runtimes": _opt_runtime_dirs(),
         "inference_py": inf_py,
         "tools": tools,
         "axdevice_error": _LAST_AXDEVICE_ERROR,
         "axsystemserver_active": _is_service_active("axsystemserver"),
         "axsystemserver_installed": os.path.exists("/usr/lib/systemd/system/axsystemserver.service")
-        or os.path.exists("/etc/systemd/system/axsystemserver.service"),
+        or os.path.exists("/etc/systemd/system/axsystemserver.service")
+        or any(os.path.exists(os.path.join(rt, "lib/systemd/system/axsystemserver.service")) for rt in _opt_runtime_dirs()),
     }
 
 

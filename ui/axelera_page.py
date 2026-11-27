@@ -790,7 +790,14 @@ class AxeleraPage(Gtk.Box):
             else:
                 hint = "Module noyau `metis` non chargé (/sys/class/metis absent)."
             if st.get("dkms_present"):
-                hint += " Essayez : `sudo modprobe metis` (ou `dkms status`)."
+                if st.get("secure_boot") is True:
+                    mok = "/var/lib/dkms/mok.pub" if st.get("dkms_mok_exists") else "<clé_MOK>"
+                    hint += (
+                        " Secure Boot UEFI est activé : la signature DKMS risque d'être rejetée (« Key was rejected by service »). "
+                        f"Désactivez Secure Boot dans le BIOS/UEFI ou importez `{mok}` via `sudo mokutil --import {mok}` puis redémarrez."
+                    )
+                else:
+                    hint += " Essayez : `sudo modprobe metis` (ou `dkms status`)."
             elif st.get("tools", {}).get("axdevice"):
                 hint += " Installez le pilote : `axdevice driver --install`."
             issues.append(hint)
@@ -1031,18 +1038,28 @@ class AxeleraPage(Gtk.Box):
 
     def _on_copy_install(self, _btn) -> None:
         st = self._last_status or {}
-        if self._devices and (st.get("sdk_dir") or st.get("axsystemserver_installed")):
+        if self._devices and (st.get("sdk_dir") or st.get("axsystemserver_installed") or st.get("opt_runtimes")):
             sdk_path = st.get("sdk_dir") or "~/voyager-sdk"
+            sb_block = ""
+            if st.get("secure_boot") is True:
+                mok = "/var/lib/dkms/mok.pub"
+                sb_block = (
+                    "# Secure Boot actif : vérifier / enrôler la clé MOK DKMS (ou désactiver Secure Boot dans le BIOS)\n"
+                    "mokutil --sb-state\n"
+                    f"sudo mokutil --import {mok}  # puis redémarrer et valider Enroll MOK au boot\n"
+                )
             cmd = (
                 f"# 1. Vérifier / charger le pilote noyau metis (noyau {st.get('kernel_release') or '$(uname -r)'})\n"
                 "dkms status\n"
+                f"{sb_block}"
                 "sudo modprobe metis\n"
                 "ls -la /sys/class/metis /dev/metis*\n"
                 "# 2. Activer le service de télémétrie\n"
                 "sudo systemctl enable --now axsystemserver\n"
-                "# 3. Vérifier les outils du SDK\n"
+                "# 3. Vérifier les outils du runtime / SDK\n"
                 f"source {sdk_path}/venv/bin/activate 2>/dev/null || true\n"
-                "which axdevice && axdevice"
+                "which axdevice || ls /opt/axelera/*/bin/axdevice 2>/dev/null\n"
+                "axdevice"
             )
             msg = "Commandes de diagnostic / activation pilote copiées dans le presse-papiers"
         else:
