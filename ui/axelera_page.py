@@ -761,8 +761,15 @@ class AxeleraPage(Gtk.Box):
         self._medias = medias
         self._last_status = st or {}
 
+        any_axdev_ok = any(d.get("axdevice_ok") for d in devs)
+        missing_axdev = [d.get("bdf") or d.get("name") for d in devs if not d.get("axdevice_ok")]
         drv_name = st.get("driver_name") or "metis"
-        drv_txt = f"{drv_name} {st['driver_version'] or 'chargé'}" if st.get("driver_loaded") else "pilote metis absent"
+        if st.get("driver_loaded"):
+            drv_txt = f"{drv_name} {st['driver_version'] or 'chargé'}"
+        elif any_axdev_ok:
+            drv_txt = "triton / userspace"
+        else:
+            drv_txt = "pilote metis absent"
         detected_sdks = st.get("detected_sdks") or []
         if st.get("sdk_dir"):
             sdk_base = os.path.basename(st["sdk_dir"])
@@ -780,7 +787,7 @@ class AxeleraPage(Gtk.Box):
         issues = []
         if not devs:
             issues.append("Aucune carte Axelera Metis (PCI 1f9d) détectée sur cette machine.")
-        if not st.get("driver_loaded"):
+        if not st.get("driver_loaded") and not any_axdev_ok:
             krel = st.get("kernel_release") or ""
             if devs:
                 hint = (
@@ -804,6 +811,10 @@ class AxeleraPage(Gtk.Box):
             elif st.get("tools", {}).get("axdevice"):
                 hint += " Installez le pilote : `axdevice driver --install`."
             issues.append(hint)
+        elif any_axdev_ok and missing_axdev:
+            issues.append(
+                f"{len(missing_axdev)} carte(s) PCIe non initialisée(s) dans axdevice : {', '.join(missing_axdev)}."
+            )
         if not st.get("tools", {}).get("axdevice"):
             if st.get("sdk_dir"):
                 other_paths = [
@@ -822,7 +833,7 @@ class AxeleraPage(Gtk.Box):
             else:
                 issues.append("Outils Voyager SDK (`axdevice`, `axrunmodel`) introuvables : sélectionnez le dossier SDK/venv.")
         if st.get("axdevice_error"):
-            issues.append(f"Erreur `axdevice` : {st['axdevice_error']}")
+            issues.append(f"Message `axdevice` : {st['axdevice_error']}")
         if st.get("axsystemserver_installed") and not st.get("axsystemserver_active"):
             issues.append("Service `axsystemserver` inactif (sondes temp/puissance indisponibles sans `sudo systemctl enable --now axsystemserver`).")
 
@@ -953,7 +964,7 @@ class AxeleraPage(Gtk.Box):
             self._bar_temp.set_fraction(max(0.0, min(1.0, float(temp_c) / ax.TEMP_SHUTDOWN_C)))
             self._bar_temp.set_text(f"{temp_c:.1f} °C / {ax.TEMP_SHUTDOWN_C:.0f} °C")
         else:
-            if not (self._last_status or {}).get("driver_loaded"):
+            if not (self._last_status or {}).get("driver_loaded") and not (dev_info or {}).get("axdevice_ok"):
                 self._tv["temp"].set_text("— (pilote metis non chargé)")
                 self._bar_temp.set_text("Pilote noyau metis non chargé")
             else:

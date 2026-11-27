@@ -98,7 +98,7 @@ def print_banner():
  |  _ \\ / _ \\ '_ \\ / __| '_ \\ \\___ \\| | | | | __/ _ \\
  | |_) |  __/ | | | (__| | | | ___) | |_| | | ||  __/
  |____/ \\___|_| |_|\\___|_| |_||____/ \\__,_|_|\\__\\___|{TermColor.RESET}
-                                {TermColor.BOLD}{TermColor.rgb(34, 211, 238)}Version CLI (Headless) 1.0.27{TermColor.RESET}
+                                {TermColor.BOLD}{TermColor.rgb(34, 211, 238)}Version CLI (Headless) 1.0.28{TermColor.RESET}
 """
     print(banner)
 

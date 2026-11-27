@@ -234,6 +234,42 @@ class TestAxeleraFunctionalMock(unittest.TestCase):
                 self.assertIn(os.path.join(rt_new, "bin"), env["PATH"])
                 self.assertIn(os.path.join(rt_new, "lib"), env.get("LD_LIBRARY_PATH", ""))
 
+    def test_real_axdevice_triton_warning_and_bdf(self):
+        real_out = (
+            "WARNING: PCI device count mismatch: lspci=6, triton=4\n"
+            "Device 0: metis-0:3:0 part of 150p 16GiB flver=1.6.0 clock=800MHz mvm=100%\n"
+            "Device 1: metis-0:4:0 part of 150p 16GiB flver=1.6.0 clock=800MHz mvm=100%\n"
+            "Device 2: metis-0:7:0 110m 1GiB flver=1.3.2 bcver=1.4 clock=800MHz mvm=100%\n"
+            "Device 3: metis-0:a:0 pcie 4GiB flver=1.9.0 bcver=7.5 clock=800MHz mvm=100%\n"
+        )
+        parsed = ax.parse_axdevice_output(real_out)
+        self.assertEqual(len(parsed), 4)
+        self.assertEqual(parsed[0]["bdf"], "0000:03:00.0")
+        self.assertEqual(parsed[0]["model"], "part of 150p")
+        self.assertEqual(parsed[0]["mem_mb"], 16384)
+        self.assertEqual(parsed[0]["mvm_pct"], 100.0)
+        self.assertEqual(parsed[2]["model"], "110m")
+        self.assertEqual(parsed[2]["mem_mb"], 1024)
+        self.assertEqual(parsed[2]["bcver"], "1.4")
+        self.assertEqual(parsed[3]["bdf"], "0000:0a:00.0")
+        self.assertEqual(parsed[3]["model"], "pcie")
+        self.assertEqual(parsed[3]["mem_mb"], 4096)
+
+        with patch("core.axelera_aipu.find_tool", return_value="/fake/axdevice"), \
+             patch("core.axelera_aipu._run", return_value=(0, real_out, "")), \
+             patch("core.axelera_aipu.driver_info", return_value={"loaded": False, "name": "", "version": "", "dev_nodes": [], "dkms_present": True}), \
+             patch("core.axelera_aipu.pci_devices", return_value=[
+                 {"bdf": f"0000:{b}:00.0", "vendor_id": "1f9d", "device_id": "1100", "desc": "Metis", "pcie_gen": "3", "pcie_width": "4", "pcie_speed": "8.0 GT/s", "driver": ""}
+                 for b in ("03", "04", "05", "06", "07", "0a")
+             ]):
+            devs = ax.list_devices(timeout=2.0)
+            st = ax.sdk_status()
+            self.assertEqual(len(devs), 6)
+            self.assertTrue(all(d["axdevice_ok"] for d in devs[:4]))
+            self.assertFalse(devs[4]["axdevice_ok"])
+            self.assertFalse(devs[5]["axdevice_ok"])
+            self.assertIn("lspci=6, triton=4", st["axdevice_error"])
+
 
 if __name__ == "__main__":
     unittest.main()

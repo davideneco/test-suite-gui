@@ -696,10 +696,14 @@ def list_devices(timeout: float = 5.0) -> List[Dict]:
     _LAST_AXDEVICE_ERROR = ""
     if axdev_bin:
         rc, out, err = _run([axdev_bin], timeout=timeout)
+        combined = "\n".join(x for x in (err, out) if x)
         if rc == 0 and out:
             ax_devs = parse_axdevice_output(out)
+            warns = [ln.strip() for ln in combined.splitlines() if re.match(r"^(?:WARNING|ERROR)\b", ln.strip(), re.I)]
+            if warns:
+                _LAST_AXDEVICE_ERROR = " | ".join(warns)[:180]
         elif rc != 0:
-            raw_err = (err or out or f"code retour {rc}").strip()
+            raw_err = combined.strip() or f"code retour {rc}"
             _LAST_AXDEVICE_ERROR = raw_err.splitlines()[-1][:180] if raw_err else f"code {rc}"
         if ax_devs:
             rc_v, out_v, _ = _run([axdev_bin, "-v"], timeout=timeout)
@@ -721,7 +725,7 @@ def list_devices(timeout: float = 5.0) -> List[Dict]:
             "pcie_gen": pci_match["pcie_gen"] if pci_match else "",
             "pcie_width": pci_match["pcie_width"] if pci_match else "",
             "pcie_speed": pci_match["pcie_speed"] if pci_match else "",
-            "driver": (pci_match["driver"] if pci_match else "") or drv_label,
+            "driver": (pci_match["driver"] if pci_match else "") or drv_label or "triton / userspace",
             "driver_version": drv["version"],
             "axdevice_ok": True,
         }
