@@ -270,6 +270,86 @@ class TestAxeleraFunctionalMock(unittest.TestCase):
             self.assertFalse(devs[5]["axdevice_ok"])
             self.assertIn("lspci=6, triton=4", st["axdevice_error"])
 
+    def test_real_axdevice_verbose_and_axcmd_fallback(self):
+        v_out = (
+            "Device 0: metis-0:3:0 part of 150p 16GiB flver=1.6.0 clock=800MHz mvm=100%\n"
+            "  device_runtime_firmware=v1.9.0\n"
+            "  board_controller_board_type=N/A\n"
+            "  sw_throttling: 200°C, hysteresis 5°C, throttle rate:12%\n"
+            "  hw_throttling: 105°C, hysteresis 10°C\n"
+            "  freq_downscaling: 110°C, hysteresis 5°C\n"
+            "  pvt_warning_threshold: 95°C\n"
+            "Device 2: metis-0:7:0 110m 1GiB flver=1.3.2 bcver=1.4 clock=800MHz mvm=100%\n"
+            "  device_runtime_firmware=v1.9.0\n"
+            "  board_controller_board_type=ortles\n"
+            "Device 3: metis-0:a:0 pcie 4GiB flver=1.9.0 bcver=7.5 clock=800MHz mvm=100%\n"
+            "  device_runtime_firmware=v1.9.0\n"
+            "  board_controller_board_type=matterhorn\n"
+        )
+        v_parsed = ax.parse_axdevice_verbose(v_out)
+        self.assertEqual(v_parsed[0]["runtime_fw"], "v1.9.0")
+        self.assertEqual(v_parsed[0]["board_type"], "N/A")
+        self.assertIn("105", v_parsed[0]["hw_throttling"])
+        self.assertEqual(v_parsed[0]["pvt_warning_c"], 95.0)
+        self.assertEqual(v_parsed[2]["board_type"], "ortles")
+        self.assertEqual(v_parsed[3]["board_type"], "matterhorn")
+
+        axcmd_out_110m = (
+            "0: temp_sensor0@48 = 31.44\n"
+            "sys_ctrl: 800MHz\n"
+            "aicore0: 50MHz\naicore1: 50MHz\naicore2: 50MHz\naicore3: 50MHz\n"
+            "noc: 800MHz\n"
+        )
+        p_110m = ax.parse_axcmd_telemetry(axcmd_out_110m)
+        self.assertAlmostEqual(p_110m["temp_c"], 31.44)
+        self.assertEqual(p_110m["clock_mhz"], 50.0)
+        self.assertIn("noc 800MHz", p_110m["core_clocks"])
+
+        axcmd_out_130p = (
+            "0: tmp175@48 = 24.50\n"
+            "1: tmp175@49 = 25.00\n"
+            "aicore0: 800MHz\naicore1: 800MHz\naicore2: 800MHz\naicore3: 800MHz\n"
+            "noc: 800MHz\n"
+        )
+        p_130p = ax.parse_axcmd_telemetry(axcmd_out_130p)
+        self.assertEqual(p_130p["temp_c"], 25.0)
+        self.assertEqual(p_130p["temp_cores"], [24.5, 25.0])
+        self.assertEqual(p_130p["clock_mhz"], 800.0)
+
+        ax.forget_cache()
+        axdev_out = (
+            "Device 0: metis-0:3:0 part of 150p 16GiB flver=1.6.0 clock=800MHz mvm=100%\n"
+            "Device 2: metis-0:7:0 110m 1GiB flver=1.3.2 bcver=1.4 clock=800MHz mvm=100%\n"
+        )
+
+        def fake_run(cmd, timeout=5.0, cwd=None, env=None):
+            exe = os.path.basename(cmd[0])
+            if exe == "axmonitor":
+                return 127, "", "axmonitor: error while loading shared libraries: libprotobuf.so.23: cannot open shared object file"
+            if exe == "axdevice":
+                return 0, axdev_out, ""
+            if exe == "axcmd":
+                if "metis-0:3:0" in cmd:
+                    # Ne doit pas demander --board-temp sans bcver
+                    self.assertNotIn("--board-temp", cmd)
+                    return 0, "aicore0: 50MHz\naicore1: 50MHz\n", ""
+                self.assertIn("--board-temp", cmd)
+                return 0, axcmd_out_110m, ""
+            return 0, "", ""
+
+        with patch("core.axelera_aipu.find_tool", side_effect=lambda n: f"/fake/{n}" if n in ("axmonitor", "axdevice", "axcmd") else ""), \
+             patch("core.axelera_aipu._run", side_effect=fake_run), \
+             patch("core.axelera_aipu.pci_devices", return_value=[]):
+            telem = ax.poll_telemetry(timeout=2.0)
+            self.assertIn("axcmd", telem["source"])
+            self.assertEqual(telem["devices"][0]["clock_mhz"], 50.0)
+            self.assertNotIn("temp_c", telem["devices"][0])
+            self.assertAlmostEqual(telem["devices"][2]["temp_c"], 31.44)
+            self.assertEqual(telem["devices"][2]["clock_mhz"], 50.0)
+            st = ax.sdk_status()
+            self.assertIn("libprotobuf.so.23", st["axmonitor_error"])
+            ax.forget_cache()
+
 
 if __name__ == "__main__":
     unittest.main()

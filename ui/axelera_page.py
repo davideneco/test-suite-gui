@@ -744,10 +744,10 @@ class AxeleraPage(Gtk.Box):
 
         def work():
             devs = ax.list_devices(timeout=4.0)
+            telem = ax.poll_telemetry(timeout=2.5)
             st = ax.sdk_status()
             models = ax.discover_models(sdk_dir=st.get("sdk_dir") or None)
             medias = ax.discover_media(sdk_dir=st.get("sdk_dir") or None)
-            telem = ax.poll_telemetry(timeout=2.5)
             return st, devs, models, medias, telem
 
         threading.Thread(
@@ -780,7 +780,10 @@ class AxeleraPage(Gtk.Box):
                 sdk_txt += f" · {len(detected_sdks)} SDK détectés"
         else:
             sdk_txt = "Voyager SDK absent"
-        srv_txt = "axsystemserver actif" if st.get("axsystemserver_active") else "axsystemserver inactif"
+        if st.get("axmonitor_error"):
+            srv_txt = "télémétrie axcmd (axmonitor incompatible)"
+        else:
+            srv_txt = "axsystemserver actif" if st.get("axsystemserver_active") else "axsystemserver inactif"
         self._sdk_badge.set_text(f"{drv_txt} · {sdk_txt} · {srv_txt}")
 
         # Bandeau avertissement détaillé et actionnable
@@ -813,7 +816,8 @@ class AxeleraPage(Gtk.Box):
             issues.append(hint)
         elif any_axdev_ok and missing_axdev:
             issues.append(
-                f"{len(missing_axdev)} carte(s) PCIe non initialisée(s) dans axdevice : {', '.join(missing_axdev)}."
+                f"{len(missing_axdev)} endpoint(s) PCIe non initialisé(s) ({', '.join(missing_axdev)}) — "
+                "si `dmesg` indique `probe failed -12` (-ENOMEM BAR PCIe), vérifiez Above 4G Decoding / `pci=realloc`."
             )
         if not st.get("tools", {}).get("axdevice"):
             if st.get("sdk_dir"):
@@ -834,7 +838,12 @@ class AxeleraPage(Gtk.Box):
                 issues.append("Outils Voyager SDK (`axdevice`, `axrunmodel`) introuvables : sélectionnez le dossier SDK/venv.")
         if st.get("axdevice_error"):
             issues.append(f"Message `axdevice` : {st['axdevice_error']}")
-        if st.get("axsystemserver_installed") and not st.get("axsystemserver_active"):
+        if st.get("axmonitor_error"):
+            issues.append(
+                f"`axmonitor` indisponible ({st['axmonitor_error']}) : repli actif sur `axcmd` "
+                "(horloges réelles aicore et sondes `--board-temp`)."
+            )
+        elif st.get("axsystemserver_installed") and not st.get("axsystemserver_active"):
             issues.append("Service `axsystemserver` inactif (sondes temp/puissance indisponibles sans `sudo systemctl enable --now axsystemserver`).")
 
         if issues:
@@ -947,8 +956,14 @@ class AxeleraPage(Gtk.Box):
         drv_v = (dev_info or {}).get("driver_version") or ""
         flver = td.get("flver") or (dev_info or {}).get("flver") or ""
         bcver = td.get("bcver") or (dev_info or {}).get("bcver") or ""
+        rt_fw = (dev_info or {}).get("runtime_fw") or ""
+        btype = (dev_info or {}).get("board_type") or ""
         fw_parts = [f"{drv}" + (f" {drv_v}" if drv_v else "")]
-        if flver:
+        if btype and btype != "N/A":
+            fw_parts.append(btype)
+        if rt_fw:
+            fw_parts.append(f"rt={rt_fw}")
+        elif flver:
             fw_parts.append(f"flver={flver}")
         if bcver:
             fw_parts.append(f"bcver={bcver}")
@@ -959,7 +974,7 @@ class AxeleraPage(Gtk.Box):
         if temp_c is not None:
             t_txt = f"{temp_c:.1f} °C"
             if temp_cores and len(temp_cores) > 1:
-                t_txt += "  [" + ", ".join(f"{x:.0f}" for x in temp_cores) + "]"
+                t_txt += "  [" + ", ".join(f"{x:.1f}" for x in temp_cores) + "]"
             self._tv["temp"].set_text(t_txt)
             self._bar_temp.set_fraction(max(0.0, min(1.0, float(temp_c) / ax.TEMP_SHUTDOWN_C)))
             self._bar_temp.set_text(f"{temp_c:.1f} °C / {ax.TEMP_SHUTDOWN_C:.0f} °C")
@@ -967,14 +982,17 @@ class AxeleraPage(Gtk.Box):
             if not (self._last_status or {}).get("driver_loaded") and not (dev_info or {}).get("axdevice_ok"):
                 self._tv["temp"].set_text("— (pilote metis non chargé)")
                 self._bar_temp.set_text("Pilote noyau metis non chargé")
+            elif (dev_info or {}).get("axdevice_ok") and not bcver:
+                self._tv["temp"].set_text("— (pas de sonde board-temp ; horloges live actives)")
+                self._bar_temp.set_text("Carte sans capteur BC (--board-temp indisponible)")
             else:
-                self._tv["temp"].set_text("— (activer axsystemserver pour les sondes live)")
-                self._bar_temp.set_text("Température non exposée sans axsystemserver")
+                self._tv["temp"].set_text("— (sonde indisponible sans axmonitor)")
+                self._bar_temp.set_text("Sonde température indisponible")
             self._bar_temp.set_fraction(0.0)
 
         self._tv["power"].set_text(_fmt(td.get("power_w"), " W", 2))
         clk = td.get("clock_mhz") or (dev_info or {}).get("clock_mhz")
-        cclk = (dev_info or {}).get("core_clocks") or ""
+        cclk = td.get("core_clocks") or (dev_info or {}).get("core_clocks") or ""
         self._tv["clock"].set_text(_fmt(clk, " MHz", 0) + (f" ({cclk})" if cclk else ""))
 
         mvm = td.get("mvm_pct") if td.get("mvm_pct") is not None else (dev_info or {}).get("mvm_pct")

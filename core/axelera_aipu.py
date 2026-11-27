@@ -48,6 +48,8 @@ _TOOL_CACHE_LOCK = threading.Lock()
 _TOOL_PATH_CACHE: Dict[str, Tuple[float, str]] = {}
 _LAST_TELEM_ERROR = ""
 _LAST_AXDEVICE_ERROR = ""
+_AXMONITOR_UNUSABLE = ""
+_NO_BC_TEMP_DEVICES: set = set()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,9 +80,12 @@ def save_config(updates: Dict) -> Dict:
 
 
 def forget_cache() -> None:
-    """Réinitialise le cache de chemins d'outils Axelera."""
+    """Réinitialise le cache de chemins d'outils et d'état télémétrie Axelera."""
+    global _AXMONITOR_UNUSABLE
     with _TOOL_CACHE_LOCK:
         _TOOL_PATH_CACHE.clear()
+        _AXMONITOR_UNUSABLE = ""
+        _NO_BC_TEMP_DEVICES.clear()
 
 
 def _candidate_homes() -> List[str]:
@@ -385,7 +390,7 @@ def sdk_status() -> Dict:
     detected_sdks = list_detected_sdks()
     tools = {
         t: find_tool(t)
-        for t in ("axdevice", "axrunmodel", "axmonitor", "axlogdevice", "axdownloadmodel", "axzoo", "axversion")
+        for t in ("axdevice", "axcmd", "axrunmodel", "axmonitor", "axlogdevice", "axdownloadmodel", "axzoo", "axversion")
     }
     sdk_ver = ""
     if sdk_dir and os.path.isfile(os.path.join(sdk_dir, "VERSION.TXT")):
@@ -422,6 +427,7 @@ def sdk_status() -> Dict:
         "inference_py": inf_py,
         "tools": tools,
         "axdevice_error": _LAST_AXDEVICE_ERROR,
+        "axmonitor_error": _AXMONITOR_UNUSABLE,
         "axsystemserver_active": _is_service_active("axsystemserver"),
         "axsystemserver_installed": os.path.exists("/usr/lib/systemd/system/axsystemserver.service")
         or os.path.exists("/etc/systemd/system/axsystemserver.service")
@@ -661,7 +667,7 @@ def _parse_mvm_avg(spec: str) -> Optional[float]:
 
 
 def parse_axdevice_verbose(text: str) -> Dict[int, Dict]:
-    """Parse des infos complémentaires éventuelles de `axdevice -v` (throttling, power limit, température)."""
+    """Parse les informations détaillées de `axdevice -v` (firmware runtime, carte, seuils thermiques)."""
     out: Dict[int, Dict] = {}
     cur = 0
     for raw in (text or "").splitlines():
@@ -673,15 +679,40 @@ def parse_axdevice_verbose(text: str) -> Dict[int, Dict]:
             continue
         if not s:
             continue
+        rm = re.match(r"device_runtime_firmware\s*=\s*(.+)", s, re.I)
+        if rm:
+            out.setdefault(cur, {})["runtime_fw"] = rm.group(1).strip()
+            continue
+        bm = re.match(r"board_controller_board_type\s*=\s*(.+)", s, re.I)
+        if bm:
+            bt = bm.group(1).strip()
+            if bt and bt.upper() != "N/A":
+                out.setdefault(cur, {})["board_type"] = bt
+            else:
+                out.setdefault(cur, {})["board_type"] = "N/A"
+            continue
         pm = re.search(r"power\s*limit\s*[:=]\s*([\d.]+)\s*W", s, re.I)
         if pm:
             out.setdefault(cur, {})["power_limit_w"] = float(pm.group(1))
-        tm = re.search(r"(?:temp|temperature)\s*[:=]\s*([\d.]+)\s*°?C", s, re.I)
+        tm = re.search(r"(?:^|\b)(?:temp|temperature)\s*[:=]\s*([\d.]+)\s*°?C", s, re.I)
         if tm:
             out.setdefault(cur, {})["temp_c"] = float(tm.group(1))
-        sm = re.search(r"(?:sw[_\s-]*throttl\w*|throttling)\s*[:=]\s*(.+)", s, re.I)
-        if sm:
-            out.setdefault(cur, {})["throttling_cfg"] = sm.group(1).strip()
+        swm = re.match(r"sw[_\s-]*throttling\s*[:=]\s*(.+)", s, re.I)
+        if swm:
+            out.setdefault(cur, {})["sw_throttling"] = swm.group(1).strip()
+            out[cur]["throttling_cfg"] = swm.group(1).strip()
+            continue
+        hwm = re.match(r"hw[_\s-]*throttling\s*[:=]\s*(.+)", s, re.I)
+        if hwm:
+            out.setdefault(cur, {})["hw_throttling"] = hwm.group(1).strip()
+            continue
+        fdm = re.match(r"freq_downscaling\s*[:=]\s*(.+)", s, re.I)
+        if fdm:
+            out.setdefault(cur, {})["freq_downscaling"] = fdm.group(1).strip()
+            continue
+        pvm = re.match(r"pvt_warning_threshold\s*[:=]\s*([\d.]+)", s, re.I)
+        if pvm:
+            out.setdefault(cur, {})["pvt_warning_c"] = float(pvm.group(1))
     return out
 
 
@@ -738,6 +769,7 @@ def list_devices(timeout: float = 5.0) -> List[Dict]:
         if _short_bdf(p["bdf"]) in used_bdfs:
             continue
         idx = len(result)
+        unbound_lbl = p["driver"] or ("non lié (probe échoué)" if drv["loaded"] else "")
         result.append({
             "index": idx,
             "name": f"metis-{_short_bdf(p['bdf'])}",
@@ -755,7 +787,7 @@ def list_devices(timeout: float = 5.0) -> List[Dict]:
             "pcie_gen": p["pcie_gen"],
             "pcie_width": p["pcie_width"],
             "pcie_speed": p["pcie_speed"],
-            "driver": p["driver"] or drv_label,
+            "driver": unbound_lbl,
             "driver_version": drv["version"],
             "axdevice_ok": False,
         })
@@ -940,17 +972,69 @@ def _read_hwmon_for_axelera(bdfs: List[str]) -> Dict[int, Dict]:
     return out
 
 
+def parse_axcmd_telemetry(text: str) -> Dict:
+    """Parse la sortie combinée de `axcmd --device <name> --clock-all-actual [--board-temp]`.
+
+    Exemples réels (SDK 1.9.1) :
+      0: temp_sensor0@48 = 31.44
+      0: tmp175@48 = 24.50
+      1: tmp175@49 = 25.00
+      sys_ctrl: 800MHz
+      aicore0: 50MHz ... aicore3: 50MHz
+      noc: 800MHz
+    """
+    out: Dict = {}
+    temps: List[float] = []
+    temp_names: List[str] = []
+    aicore_clks: List[float] = []
+    noc_clk: Optional[float] = None
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        tm = re.match(r"^\d+:\s*([^\s=]+)\s*=\s*(-?\d+(?:\.\d+)?)\s*$", s)
+        if tm:
+            temp_names.append(tm.group(1))
+            temps.append(float(tm.group(2)))
+            continue
+        cm = re.match(r"^([A-Za-z0-9_]+)\s*:\s*(\d+(?:\.\d+)?)\s*(GHz|MHz)\b", s, re.I)
+        if cm:
+            dom = cm.group(1).lower()
+            mhz = float(cm.group(2)) * (1000.0 if cm.group(3).lower() == "ghz" else 1.0)
+            if dom.startswith("aicore"):
+                aicore_clks.append(round(mhz, 1))
+            elif dom == "noc":
+                noc_clk = round(mhz, 1)
+    if temps:
+        out["temp_cores"] = temps
+        out["temp_c"] = max(temps)
+        out["board_temp_c"] = max(temps)
+        out["temp_source"] = "axcmd:" + ",".join(temp_names)
+    if aicore_clks:
+        avg_clk = round(sum(aicore_clks) / len(aicore_clks), 1)
+        out["clock_mhz"] = avg_clk
+        out["aicore_clocks"] = aicore_clks
+        if len(set(aicore_clks)) == 1:
+            clk_desc = f"aicore {aicore_clks[0]:.0f}MHz"
+        else:
+            clk_desc = "aicore " + "/".join(f"{c:.0f}" for c in aicore_clks) + "MHz"
+        if noc_clk is not None:
+            clk_desc += f" · noc {noc_clk:.0f}MHz"
+        out["core_clocks"] = clk_desc
+    return out
+
+
 def poll_telemetry(timeout: float = 2.5, server_address: str = "127.0.0.1:5555") -> Dict:
-    """Collecte la télémétrie courante de toutes les cartes Axelera (axmonitor + axdevice + hwmon)."""
-    global _LAST_TELEM_ERROR
+    """Collecte la télémétrie courante de toutes les cartes Axelera (axmonitor + axdevice + axcmd + hwmon)."""
+    global _LAST_TELEM_ERROR, _AXMONITOR_UNUSABLE
     devices: Dict[int, Dict] = {}
     source_parts: List[str] = []
     server_ok = False
     err = ""
 
-    # 1. axmonitor one-shot (si installé et axsystemserver actif)
+    # 1. axmonitor one-shot (si installé, exécutable et axsystemserver actif)
     axmon = find_tool("axmonitor")
-    if axmon:
+    if axmon and not _AXMONITOR_UNUSABLE:
         rc, out, serr = _run(
             [axmon, "--server-address", server_address, "--ui", "console", "-c", "print"],
             timeout=timeout,
@@ -963,15 +1047,21 @@ def poll_telemetry(timeout: float = 2.5, server_address: str = "127.0.0.1:5555")
                 for idx, vals in parsed.items():
                     devices.setdefault(idx, {}).update(vals)
         elif serr:
-            err = serr.splitlines()[0][:140]
+            first_line = serr.splitlines()[0][:180]
+            if "error while loading shared libraries" in serr or "cannot open shared object file" in serr:
+                _AXMONITOR_UNUSABLE = first_line
+            else:
+                err = first_line[:140]
 
-    # 2. axdevice (toujours utile pour horloge réelle, MVM %, modèle et détection throttling horloge)
+    # 2. axdevice (modèle, BDF, firmware, MVM % et profil horloge)
     axdev = find_tool("axdevice")
+    ax_items: List[Dict] = []
     if axdev:
         rc, out, derr = _run([axdev], timeout=timeout)
         if rc == 0 and out:
             source_parts.append("axdevice")
-            for item in parse_axdevice_output(out):
+            ax_items = parse_axdevice_output(out)
+            for item in ax_items:
                 idx = item["index"]
                 d = devices.setdefault(idx, {})
                 if item.get("clock_mhz") is not None and "clock_mhz" not in d:
@@ -984,17 +1074,51 @@ def poll_telemetry(timeout: float = 2.5, server_address: str = "127.0.0.1:5555")
                 d["mem_mb"] = item.get("mem_mb")
                 d["flver"] = item.get("flver", "")
                 d["bcver"] = item.get("bcver", "")
-                # Indice de throttling thermique si temp >= 105 °C ou horloge abaissée alors que MVM est limité
-                if d.get("temp_c") is not None and d["temp_c"] >= TEMP_HW_THROTTLE_C:
-                    d["throttle_thermal"] = 1
-                elif d.get("clock_mhz") is not None and d["clock_mhz"] < 700 and d.get("temp_c", 0) >= TEMP_WARNING_C:
-                    d["throttle_thermal"] = 1
-                else:
-                    d.setdefault("throttle_thermal", 0)
         elif derr and not err:
             err = derr.splitlines()[0][:140]
 
-    # 3. hwmon PCI sysfs éventuel
+    # 3. axcmd (repli natif SDK 1.9+ : horloges réelles aicore0..3 + température board controller)
+    axcmd_bin = find_tool("axcmd")
+    axcmd_used = False
+    if axcmd_bin and ax_items:
+        for item in ax_items:
+            idx = item["index"]
+            dname = item.get("name") or ""
+            if not dname:
+                continue
+            d = devices.setdefault(idx, {})
+            need_temp = ("temp_c" not in d) and bool(item.get("bcver")) and (dname not in _NO_BC_TEMP_DEVICES)
+            args = [axcmd_bin, "--device", dname, "--clock-all-actual"]
+            if need_temp:
+                args.append("--board-temp")
+            rc_c, out_c, err_c = _run(args, timeout=min(timeout, 2.5))
+            combined_c = "\n".join(x for x in (out_c, err_c) if x)
+            if need_temp and ("Failed to read sensor temperature" in combined_c or "timed out" in combined_c):
+                _NO_BC_TEMP_DEVICES.add(dname)
+            parsed_c = parse_axcmd_telemetry(out_c)
+            if parsed_c:
+                axcmd_used = True
+                if "clock_mhz" in parsed_c:
+                    d["clock_mhz"] = parsed_c["clock_mhz"]
+                if "core_clocks" in parsed_c:
+                    d["core_clocks"] = parsed_c["core_clocks"]
+                if "temp_c" in parsed_c and "temp_c" not in d:
+                    d["temp_c"] = parsed_c["temp_c"]
+                    d["temp_cores"] = parsed_c.get("temp_cores", [])
+                    d["board_temp_c"] = parsed_c["board_temp_c"]
+                    d["temp_source"] = parsed_c.get("temp_source", "axcmd")
+        if axcmd_used:
+            source_parts.append("axcmd")
+
+    # 4. Indice throttling thermique + hwmon PCI sysfs éventuel
+    for idx, d in devices.items():
+        if d.get("temp_c") is not None and d["temp_c"] >= TEMP_HW_THROTTLE_C:
+            d["throttle_thermal"] = 1
+        elif d.get("clock_mhz") is not None and d["clock_mhz"] < 700 and d.get("temp_c", 0) >= TEMP_WARNING_C:
+            d["throttle_thermal"] = 1
+        else:
+            d.setdefault("throttle_thermal", 0)
+
     pcis = pci_devices()
     if pcis:
         hw = _read_hwmon_for_axelera([p["bdf"] for p in pcis])
